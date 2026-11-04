@@ -1,29 +1,25 @@
-name: Garmin Export Test
+name: Garmin Data Export
 
 on:
   workflow_dispatch:
-    inputs:
-      test_days:
-        description: "Number of days for activity and range-data test"
-        required: true
-        default: "30"
-        type: string
-      daily_test_days:
-        description: "Number of days for daily heart-rate, HRV and SpO2 calls"
-        required: true
-        default: "14"
-        type: string
+  schedule:
+    # GitHub cron is UTC. Paired slots plus a local Europe/Stockholm guard
+    # keep runs at 08:00, 14:00 and 20:00 in both CET and CEST.
+    - cron: "0 6,7,12,13,18,19 * * *"
 
 permissions:
   contents: read
 
-jobs:
-  export-test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+concurrency:
+  group: garmin-data-export
+  cancel-in-progress: false
 
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
-      - name: Checkout repository
+      - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -34,24 +30,16 @@ jobs:
       - name: Install Garmin client
         run: python -m pip install --upgrade garmin-connect-personal-api-python dropbox
 
-      - name: Run bounded Garmin export test
+      - name: Export Garmin data
         env:
-          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
-          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
-          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
-          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
-          GARMIN_TEST_DAYS: ${{ inputs.test_days }}
-          GARMIN_DAILY_TEST_DAYS: ${{ inputs.daily_test_days }}
+          GARMIN_PERSONAL_API_KEY: \${{ secrets.GARMIN_PERSONAL_API_KEY }}
+          DROPBOX_APP_KEY: \${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: \${{ secrets.DROPBOX_APP_SECRET }}
+          DROPBOX_REFRESH_TOKEN: \${{ secrets.DROPBOX_REFRESH_TOKEN }}
           GARMIN_REQUEST_PAUSE_SECONDS: "1"
           GARMIN_BATCH_PAUSE_SECONDS: "20"
           GARMIN_MAX_RETRIES: "8"
+          GARMIN_CURRENT_ACTIVITY_DAYS: "30"
+          GARMIN_RANGE_DAYS: "30"
+          GARMIN_DAILY_DETAIL_DAYS: "14"
         run: python src/garmin_export.py
-
-      - name: Upload test JSON
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: garmin-test-export
-          path: export/garmin_test.json
-          if-no-files-found: error
-          retention-days: 7
