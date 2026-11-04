@@ -1,1 +1,43 @@
 
+name: Garmin Export
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5,17 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Garmin client
+        run: python -m pip install garmin-connect-personal-api-python
+
+      - name: Run Garmin export
+        env:
+          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
+          EXPORT_DAYS: "730"
+          DAILY_EXPORT_DAYS: "30"
+        run: python src/garmin_export.py
+
+      - name: Save export as workflow artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: garmin-export
+          path: export/garmin_latest.json
+          if-no-files-found: warn
+          retention-days: 7
+
