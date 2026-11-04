@@ -36,9 +36,9 @@ jobs:
 
       - name: Run bounded Garmin export test
         env:
-          GARMIN_PERSONAL_API_KEY: \${{ secrets.GARMIN_PERSONAL_API_KEY }}
-          GARMIN_TEST_DAYS: \${{ inputs.test_days }}
-          GARMIN_DAILY_TEST_DAYS: \${{ inputs.daily_test_days }}
+          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
+          GARMIN_TEST_DAYS: ${{ inputs.test_days }}
+          GARMIN_DAILY_TEST_DAYS: ${{ inputs.daily_test_days }}
           GARMIN_REQUEST_PAUSE_SECONDS: "1"
           GARMIN_BATCH_PAUSE_SECONDS: "20"
           GARMIN_MAX_RETRIES: "8"
