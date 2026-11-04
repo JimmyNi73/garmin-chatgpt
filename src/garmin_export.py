@@ -113,6 +113,21 @@ def activity_key(item: dict[str, Any]) -> str | None:
     return str(value) if value is not None else None
 
 
+def optional_source(
+    cli: GarminCLI,
+    source_errors: list[dict[str, str]],
+    label: str,
+    *args: str,
+) -> tuple[bool, Any]:
+    """Fetch a non-critical source without aborting the complete export."""
+    try:
+        return True, cli.run(label, *args)
+    except Exception as exc:
+        message = str(exc)
+        LOG.error("Optional source %s failed; continuing: %s", label, message)
+        source_errors.append({"source": label, "error": message})
+        return False, None
+
 
 def upload_to_dropbox(local_path: Path, destination: str) -> None:
     """Upload a file to this app's Dropbox folder."""
@@ -172,6 +187,8 @@ def main() -> None:
     start_s, end_s = start.isoformat(), today.isoformat()
     cli = GarminCLI()
 
+    source_errors: list[dict[str, str]] = []
+    source_status: dict[str, str] = {}
     export: dict[str, Any] = {
         "schema_version": 1,
         "metadata": {
@@ -180,8 +197,10 @@ def main() -> None:
             "note": "Test window only; not the full history/current production export.",
         },
         "period": {"start_date": start_s, "end_date": end_s},
-        "profile": cli.run("profile-settings", "profile-settings"),
-        "heart_rate_zones": cli.run("heart-rate-zones", "heart-rate-zones"),
+        "profile": None,
+        "heart_rate_zones": None,
+        "source_status": source_status,
+        "source_errors": source_errors,
         "activities": [],
         "daily": {
             "range_data": {},
@@ -224,6 +243,15 @@ def main() -> None:
             LOG.info("Fetched details for %d/%d activities", index, len(summaries))
             time.sleep(BATCH_PAUSE)
 
+    # Profile and zone metadata are useful but must not block the export.
+    for field, command in (
+        ("profile", "profile-settings"),
+        ("heart_rate_zones", "heart-rate-zones"),
+    ):
+        ok, value = optional_source(cli, source_errors, command, command)
+        export[field] = value
+        source_status[command] = "ok" if ok else "error"
+
     range_commands = {
         "stress": "stress",
         "sleep_summaries": "sleep-summaries",
@@ -234,10 +262,15 @@ def main() -> None:
     }
     for field, command in range_commands.items():
         LOG.info("Exporting %s", command)
-        value = cli.run(
-            command, command, "--start-date", start_s, "--end-date", end_s
+        ok, value = optional_source(
+            cli, source_errors, command, command,
+            "--start-date", start_s, "--end-date", end_s,
         )
-        export["daily"]["range_data"][field] = date_index(value)
+        export["daily"]["range_data"][field] = (
+            date_index(value) if ok else
+            {"raw": None, "by_date": {}, "error": "source request failed"}
+        )
+        source_status[command] = "ok" if ok else "error"
 
     daily_commands = {
         "heart_rate": "heart-rate",
@@ -249,23 +282,33 @@ def main() -> None:
         key = day.isoformat()
         export["daily"]["by_date"][key] = {}
         for field, command in daily_commands.items():
-            export["daily"]["by_date"][key][field] = cli.run(
-                f"{command} {key}", command, "--date", key
+            label = f"{command} {key}"
+            ok, value = optional_source(
+                cli, source_errors, label, command, "--date", key
             )
+            export["daily"]["by_date"][key][field] = (
+                value if ok else {"error": "source request failed"}
+            )
+            source_status[label] = "ok" if ok else "error"
 
     export["metadata"]["garmin_api_requests"] = cli.request_count
     export["metadata"]["activity_count"] = len(export["activities"])
     export["metadata"]["daily_single_day_count"] = DAILY_TEST_DAYS
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    with OUTPUT_FILE.open("w", encoding="utf-8", newline="\n") as handle:
+    export["metadata"]["source_error_count"] = len(source_errors)
+    export["metadata"]["export_status"] = (
+        "complete" if not source_errors else "partial"
+    )
+    with OUTPUT_FILE.open("w", encoding="utf-8", newline="\\n") as handle:
         json.dump(export, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
+        handle.write("\\n")
 
     LOG.info("Created %s (%d bytes)", OUTPUT_FILE, OUTPUT_FILE.stat().st_size)
+    # Upload even when optional Garmin sources failed; the JSON records each failure.
     upload_to_dropbox(OUTPUT_FILE, "/garmin_test.json")
-    LOG.info("Activities: %d; Garmin requests: %d",
-             len(export["activities"]), cli.request_count)
-
+    LOG.info(
+        "Activities: %d; Garmin requests: %d; optional source errors: %d",
+        len(export["activities"]), cli.request_count, len(source_errors),
+    )
 
 if __name__ == "__main__":
     try:
