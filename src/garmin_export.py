@@ -121,10 +121,12 @@ def upload_to_dropbox() -> None:
     if missing:
         raise RuntimeError("Missing Dropbox GitHub secret(s): " + ", ".join(missing))
 
+    # The value currently stored in DROPBOX_REFRESH_TOKEN is the short-lived
+    # token generated in the Dropbox console. Use it as an access token for
+    # this one-off connectivity test; replace it with a real refresh token
+    # before enabling scheduled automation.
     dbx = dropbox.Dropbox(
-        oauth2_refresh_token=os.environ["DROPBOX_REFRESH_TOKEN"],
-        app_key=os.environ["DROPBOX_APP_KEY"],
-        app_secret=os.environ["DROPBOX_APP_SECRET"],
+        oauth2_access_token=os.environ["DROPBOX_REFRESH_TOKEN"],
         timeout=120,
     )
     account = dbx.users_get_current_account()
