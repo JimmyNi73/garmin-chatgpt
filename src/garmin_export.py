@@ -161,7 +161,7 @@ def main() -> None:
             "test": "GarminChatGPT Dropbox connection",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "status": "Dropbox write test",
-        }, ensure_ascii=False, indent=2) + "\\n",
+        }, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     upload_to_dropbox(smoke_file, "/dropbox_connection_test.json")
