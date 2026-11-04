@@ -1,62 +1,55 @@
 
 #!/usr/bin/env python3
-"""
-Garmin Connect Personal API export.
-
-Environment variables:
-    GARMIN_PERSONAL_API_KEY  Garmin Personal API key
-    EXPORT_DAYS             History window for daily metrics (default: 730)
-    OUTPUT_DIR              Output directory (default: export)
-"""
-
-from __future__ import annotations
+"""Export Garmin Connect Personal API data to JSON."""
 
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
-from datetime import date, timedelta, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 LOG = logging.getLogger("garmin_export")
 
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "export"))
 EXPORT_DAYS = int(os.getenv("EXPORT_DAYS", "730"))
-ACTIVITY_PAGE_SIZE = 100
+DAILY_EXPORT_DAYS = int(os.getenv("DAILY_EXPORT_DAYS", "30"))
+PAGE_SIZE = 100
 
-# Commands that return date-based information.
-DATE_RANGE_COMMANDS = [
+# Commands accepting a date range.
+RANGE_COMMANDS = [
     "stress",
     "steps",
     "hydration",
+    "effective-weight-goals",
     "weight-measurements",
+    "sleep-summaries",
+    "body-battery",
     "daily-summaries",
-    "heart-rate",
     "hrv-summaries",
-    "heart-rate-zones",
     "wellness-activity-summaries",
 ]
 
-# Commands that return one day's information.
+# Commands accepting one calendar date.
 DAILY_COMMANDS = [
+    "food-logs",
     "sleep",
-    "sleep-summaries",
-    "body-battery",
+    "heart-rate",
     "hrv",
-    "spo2",
     "fitness-age",
+    "spo2",
 ]
 
-# Commands without date parameters.
+# Commands requiring no date.
 SINGLE_COMMANDS = [
     "profile-settings",
+    "heart-rate-zones",
 ]
 
 
-def run_cli(args: list[str], allow_failure: bool = False):
-    """Run gc-personal and parse its JSON output."""
+def run_garmin(args):
+    """Run Garmin CLI and return decoded JSON."""
     command = ["gc-personal", "--quiet", *args]
 
     result = subprocess.run(
@@ -65,98 +58,61 @@ def run_cli(args: list[str], allow_failure: bool = False):
         text=True,
         encoding="utf-8",
         errors="replace",
+        timeout=120,
     )
 
     if result.returncode != 0:
-        message = result.stderr.strip() or "Unknown Garmin CLI error"
-        if allow_failure:
-            LOG.warning("%s: %s", " ".join(args), message)
-            return None
+        message = result.stderr.strip() or "Unknown Garmin error"
         raise RuntimeError(message)
 
     output = result.stdout.strip()
+
     if not output:
         return None
 
+    return json.loads(output)
+
+
+def collect(name, args, errors):
+    """Run one export and record errors without stopping everything."""
+    LOG.info("Exporting %s", name)
+
     try:
-        return json.loads(output)
-    except json.JSONDecodeError:
-        LOG.warning("Could not parse JSON from: %s", " ".join(args))
-        return {"raw_output": output}
+        return run_garmin(args)
+    except Exception as exc:
+        LOG.error("%s failed: %s", name, exc)
+        errors.append({
+            "dataset": name,
+            "error": str(exc),
+        })
+        return None
 
 
-def get_supported_commands() -> set[str]:
-    """Discover commands supported by the installed Garmin CLI."""
-    result = subprocess.run(
-        ["gc-personal", "--help"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError("Could not read gc-personal --help")
-
-    commands = set()
-
-    for line in result.stdout.splitlines():
-        match = re.match(r"^\s{2,}([a-z][a-z0-9-]+)\s{2,}", line)
-        if match:
-            commands.add(match.group(1))
-
-    return commands
-
-
-def get_command_help(command: str) -> str:
-    result = subprocess.run(
-        ["gc-personal", command, "--help"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    return result.stdout + "\n" + result.stderr
-
-
-def export_date_range(command: str, start: str, end: str):
-    """Export a command that supports a date range."""
-    return run_cli([
-        command,
-        "--start-date", start,
-        "--end-date", end,
-    ], allow_failure=True)
-
-
-def export_daily(command: str, day: str):
-    """Export a command that supports a single date."""
-    return run_cli([
-        command,
-        "--date", day,
-    ], allow_failure=True)
-
-
-def export_activities(start: str, end: str):
-    """Retrieve all activities using pagination."""
+def export_activities(start, end, errors):
+    """Retrieve activities using pagination."""
     activities = []
     offset = 0
 
     while True:
-        page = run_cli([
-            "activities",
-            "--start", str(offset),
-            "--limit", str(ACTIVITY_PAGE_SIZE),
-            "--start-date", start,
-            "--end-date", end,
-        ])
+        page = collect(
+            f"activities page {offset}",
+            [
+                "activities",
+                "--start", str(offset),
+                "--limit", str(PAGE_SIZE),
+                "--start-date", start,
+                "--end-date", end,
+            ],
+            errors,
+        )
 
         if not isinstance(page, list) or not page:
             break
 
         activities.extend(page)
-        LOG.info("Activities retrieved: %s", len(activities))
+        LOG.info("Retrieved %s activities", len(activities))
 
-        if len(page) < ACTIVITY_PAGE_SIZE:
+        if len(page) < PAGE_SIZE:
             break
 
         offset += len(page)
@@ -164,8 +120,8 @@ def export_activities(start: str, end: str):
     return activities
 
 
-def export_activity_details(activities: list):
-    """Retrieve individual activity details and workouts."""
+def export_activity_details(activities, errors):
+    """Retrieve details and workout sets for each activity."""
     details = {}
     workouts = {}
 
@@ -175,36 +131,37 @@ def export_activity_details(activities: list):
         if not activity_id:
             continue
 
-        key = str(activity_id)
-
+        activity_id = str(activity_id)
         LOG.info(
             "Activity details %s/%s: %s",
             index,
             len(activities),
-            key,
+            activity_id,
         )
 
-        detail = run_cli(
-            ["activity", key],
-            allow_failure=True,
+        detail = collect(
+            f"activity {activity_id}",
+            ["activity", activity_id],
+            errors,
         )
 
         if detail is not None:
-            details[key] = detail
+            details[activity_id] = detail
 
-        workout = run_cli(
-            ["activity-workouts", key],
-            allow_failure=True,
+        workout = collect(
+            f"activity-workouts {activity_id}",
+            ["activity-workouts", activity_id],
+            errors,
         )
 
         if workout is not None:
-            workouts[key] = workout
+            workouts[activity_id] = workout
 
     return details, workouts
 
 
-def export_daily_history(command: str, start_day: date, end_day: date):
-    """Export one-day commands over the selected history window."""
+def export_daily_history(command, start_day, end_day, errors):
+    """Export a command once per day."""
     result = {}
 
     current = start_day
@@ -212,7 +169,11 @@ def export_daily_history(command: str, start_day: date, end_day: date):
     while current <= end_day:
         day = current.isoformat()
 
-        data = export_daily(command, day)
+        data = collect(
+            f"{command} {day}",
+            [command, "--date", day],
+            errors,
+        )
 
         if data is not None:
             result[day] = data
@@ -229,74 +190,73 @@ def main():
     )
 
     if not os.getenv("GARMIN_PERSONAL_API_KEY"):
-        raise RuntimeError("GARMIN_PERSONAL_API_KEY is not configured")
+        raise RuntimeError(
+            "GARMIN_PERSONAL_API_KEY environment variable is missing"
+        )
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if EXPORT_DAYS < 1 or DAILY_EXPORT_DAYS < 1:
+        raise ValueError("Export periods must be at least one day")
 
-    end_day = date.today()
-    start_day = end_day - timedelta(days=EXPORT_DAYS)
-
-    start = start_day.isoformat()
-    end = end_day.isoformat()
-
-    supported = get_supported_commands()
+    today = date.today()
+    range_start = today - timedelta(days=EXPORT_DAYS - 1)
+    daily_start = today - timedelta(days=DAILY_EXPORT_DAYS - 1)
 
     export = {
         "metadata": {
             "exported_at": datetime.now(timezone.utc).isoformat(),
-            "period_start": start,
-            "period_end": end,
+            "range_start": range_start.isoformat(),
+            "range_end": today.isoformat(),
+            "daily_history_start": daily_start.isoformat(),
+            "daily_history_end": today.isoformat(),
             "export_days": EXPORT_DAYS,
-            "supported_commands": sorted(supported),
+            "daily_export_days": DAILY_EXPORT_DAYS,
         },
         "data": {},
         "errors": [],
     }
 
-    # Activities and individual activity details.
-    if "activities" in supported:
-        LOG.info("Exporting activities...")
-        activities = export_activities(start, end)
-        export["data"]["activities"] = activities
+    errors = export["errors"]
+    start = range_start.isoformat()
+    end = today.isoformat()
 
-        if "activity" in supported or "activity-workouts" in supported:
-            details, workouts = export_activity_details(activities)
-            export["data"]["activity_details"] = details
-            export["data"]["activity_workouts"] = workouts
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Date-range commands.
-    for command in DATE_RANGE_COMMANDS:
-        if command not in supported:
-            continue
+    # Activities.
+    activities = export_activities(start, end, errors)
+    export["data"]["activities"] = activities
 
-        LOG.info("Exporting %s...", command)
-        data = export_date_range(command, start, end)
+    # Individual activity details and strength-training sets.
+    details, workouts = export_activity_details(activities, errors)
+    export["data"]["activity_details"] = details
+    export["data"]["activity_workouts"] = workouts
+
+    # Date-range datasets.
+    for command in RANGE_COMMANDS:
+        data = collect(
+            command,
+            [
+                command,
+                "--start-date", start,
+                "--end-date", end,
+            ],
+            errors,
+        )
 
         if data is not None:
             export["data"][command] = data
-        else:
-            export["errors"].append(command)
 
-    # Daily commands.
+    # Daily datasets (30 days by default).
     for command in DAILY_COMMANDS:
-        if command not in supported:
-            continue
+        export["data"][command] = export_daily_history(
+            command,
+            daily_start,
+            today,
+            errors,
+        )
 
-        LOG.info("Exporting %s...", command)
-
-        # Daily endpoints can be slow over long periods.
-        # We retain the full requested history window.
-        data = export_daily_history(command, start_day, end_day)
-
-        export["data"][command] = data
-
-    # Profile and other commands without date parameters.
+    # Datasets without date parameters.
     for command in SINGLE_COMMANDS:
-        if command not in supported:
-            continue
-
-        LOG.info("Exporting %s...", command)
-        data = run_cli([command], allow_failure=True)
+        data = collect(command, [command], errors)
 
         if data is not None:
             export["data"][command] = data
@@ -312,15 +272,14 @@ def main():
         )
 
     LOG.info("Export completed: %s", output_file)
+    LOG.info("Activities: %s", len(activities))
+    LOG.info("Errors: %s", len(errors))
     LOG.info("File size: %s bytes", output_file.stat().st_size)
-    LOG.info("Activities: %s", len(export["data"].get("activities", [])))
-    LOG.info("Errors: %s", len(export["errors"]))
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception:
-        LOG.exception("Garmin export failed")
+        logging.exception("Garmin export failed")
         sys.exit(1)
-
