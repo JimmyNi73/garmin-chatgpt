@@ -38,7 +38,7 @@ def should_run() -> bool:
     if os.getenv("GITHUB_EVENT_NAME") != "schedule":
         return True
     local = datetime.now(TZ)
-    return local.minute < 30 and local.hour in (8, 14, 20)
+    return local.minute < 30 and local.hour in (6, 8, 14, 16, 20)
 
 
 def retry_after(stderr: str) -> int | None:
@@ -344,7 +344,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     if not should_run():
-        LOG.info("Scheduled invocation outside 08:00, 14:00, 20:00 Stockholm time; skipping.")
+        LOG.info("Scheduled invocation outside 06:00, 08:00, 14:00, 16:00, 20:00 Stockholm time; skipping.")
         return
     if not os.getenv("GARMIN_PERSONAL_API_KEY"):
         raise RuntimeError("GARMIN_PERSONAL_API_KEY is missing")
