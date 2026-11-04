@@ -1,17 +1,26 @@
-
-name: Garmin Export
+name: Garmin Export Test
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 5,17 * * *"
+    inputs:
+      test_days:
+        description: "Number of days for activity and range-data test"
+        required: true
+        default: "30"
+        type: string
+      daily_test_days:
+        description: "Number of days for daily heart-rate, HRV and SpO2 calls"
+        required: true
+        default: "14"
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  export:
+  export-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -23,21 +32,23 @@ jobs:
           python-version: "3.12"
 
       - name: Install Garmin client
-        run: python -m pip install garmin-connect-personal-api-python
+        run: python -m pip install --upgrade garmin-connect-personal-api-python
 
-      - name: Run Garmin export
+      - name: Run bounded Garmin export test
         env:
-          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
-          EXPORT_DAYS: "730"
-          DAILY_EXPORT_DAYS: "30"
+          GARMIN_PERSONAL_API_KEY: \${{ secrets.GARMIN_PERSONAL_API_KEY }}
+          GARMIN_TEST_DAYS: \${{ inputs.test_days }}
+          GARMIN_DAILY_TEST_DAYS: \${{ inputs.daily_test_days }}
+          GARMIN_REQUEST_PAUSE_SECONDS: "1"
+          GARMIN_BATCH_PAUSE_SECONDS: "20"
+          GARMIN_MAX_RETRIES: "8"
         run: python src/garmin_export.py
 
-      - name: Save export as workflow artifact
+      - name: Upload test JSON
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: garmin-export
-          path: export/garmin_latest.json
-          if-no-files-found: warn
+          name: garmin-test-export
+          path: export/garmin_test.json
+          if-no-files-found: error
           retention-days: 7
-
