@@ -96,15 +96,52 @@ def as_list(value: Any) -> list[Any]:
 
 
 def date_index(value: Any) -> dict[str, Any]:
-    """Keep the original response and index recognizable daily rows for analysis."""
-    rows = as_list(value)
+    """Keep the original response and index recognizable daily rows for analysis.
+
+    Garmin endpoints are not consistent: some return arrays, while others return
+    a single daily record or an object containing records keyed by date. Preserve
+    the exact raw response and index whichever records can be identified.
+    """
     indexed: dict[str, Any] = {}
-    for row in rows:
-        if isinstance(row, dict):
+    rows: list[tuple[str | None, Any]] = []
+
+    if isinstance(value, list):
+        rows = [(None, row) for row in value]
+    elif isinstance(value, dict):
+        date_fields = ("calendarDate", "date", "startDate", "summaryDate")
+        if any(value.get(key) for key in date_fields):
+            # A single daily record, rather than a list of records.
+            rows = [(None, value)]
+        else:
+            # Some Garmin responses are envelopes; others are date-keyed maps.
+            for key in ("dailySummaries", "daily_summaries", "summaries",
+                        "data", "items", "values"):
+                nested = value.get(key)
+                if isinstance(nested, list):
+                    rows = [(None, row) for row in nested]
+                    break
+                if isinstance(nested, dict):
+                    rows = [(str(k), v) for k, v in nested.items()]
+                    break
+            if not rows:
+                rows = [(str(k), v) for k, v in value.items()
+                        if isinstance(v, dict)]
+    elif value is not None:
+        LOG.warning("Unexpected daily response type %s; preserving raw payload",
+                    type(value).__name__)
+
+    for supplied_key, row in rows:
+        if not isinstance(row, dict):
+            continue
+        indexed_date = supplied_key[:10] if supplied_key else None
+        if not indexed_date:
             for key in ("calendarDate", "date", "startDate", "summaryDate"):
                 if row.get(key):
-                    indexed[str(row[key])[:10]] = row
+                    indexed_date = str(row[key])[:10]
                     break
+        if indexed_date:
+            indexed[indexed_date] = row
+
     return {"raw": value, "by_date": indexed}
 
 
