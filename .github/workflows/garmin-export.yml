@@ -32,11 +32,14 @@ jobs:
           python-version: "3.12"
 
       - name: Install Garmin client
-        run: python -m pip install --upgrade garmin-connect-personal-api-python
+        run: python -m pip install --upgrade garmin-connect-personal-api-python dropbox
 
       - name: Run bounded Garmin export test
         env:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
           GARMIN_TEST_DAYS: ${{ inputs.test_days }}
           GARMIN_DAILY_TEST_DAYS: ${{ inputs.daily_test_days }}
           GARMIN_REQUEST_PAUSE_SECONDS: "1"
