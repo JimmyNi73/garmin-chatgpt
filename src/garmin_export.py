@@ -38,7 +38,7 @@ def should_run() -> bool:
     if os.getenv("GITHUB_EVENT_NAME") != "schedule":
         return True
     local = datetime.now(TZ)
-    return local.minute == 0 and local.hour in (8, 14, 20)
+    return local.minute < 30 and local.hour in (8, 14, 20)
 
 
 def retry_after(stderr: str) -> int | None:
