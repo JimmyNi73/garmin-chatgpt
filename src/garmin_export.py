@@ -114,31 +114,28 @@ def activity_key(item: dict[str, Any]) -> str | None:
 
 
 
-def upload_to_dropbox() -> None:
-    """Upload the completed test export to this app's Dropbox folder."""
+def upload_to_dropbox(local_path: Path, destination: str) -> None:
+    """Upload a file to this app's Dropbox folder."""
     required = ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN")
     missing = [name for name in required if not os.getenv(name)]
     if missing:
         raise RuntimeError("Missing Dropbox GitHub secret(s): " + ", ".join(missing))
 
-    # The value currently stored in DROPBOX_REFRESH_TOKEN is the short-lived
-    # token generated in the Dropbox console. Use it as an access token for
-    # this one-off connectivity test; replace it with a real refresh token
-    # before enabling scheduled automation.
+    # The Dropbox console's generated token is short-lived. It is used here
+    # only for this one-off connectivity test, not for scheduled automation.
     dbx = dropbox.Dropbox(
         oauth2_access_token=os.environ["DROPBOX_REFRESH_TOKEN"],
         timeout=120,
     )
     account = dbx.users_get_current_account()
-    destination = "/garmin_test.json"
     metadata = dbx.files_upload(
-        OUTPUT_FILE.read_bytes(),
+        local_path.read_bytes(),
         destination,
         mode=WriteMode.overwrite,
         mute=True,
     )
     LOG.info(
-        "Uploaded %s for Dropbox account %s (file id: %s)",
+        "Dropbox upload OK: %s (account %s; file id %s)",
         metadata.path_display or destination,
         account.email,
         metadata.id,
@@ -155,6 +152,19 @@ def main() -> None:
         raise RuntimeError("GARMIN_PERSONAL_API_KEY is missing")
     if TEST_DAYS < 1 or DAILY_TEST_DAYS < 1 or DAILY_TEST_DAYS > TEST_DAYS:
         raise ValueError("Require 1 <= GARMIN_DAILY_TEST_DAYS <= GARMIN_TEST_DAYS")
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # Prove Dropbox authentication and write access before spending time on Garmin.
+    smoke_file = OUTPUT_DIR / "dropbox_connection_test.json"
+    smoke_file.write_text(
+        json.dumps({
+            "test": "GarminChatGPT Dropbox connection",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "Dropbox write test",
+        }, ensure_ascii=False, indent=2) + "\\n",
+        encoding="utf-8",
+    )
+    upload_to_dropbox(smoke_file, "/dropbox_connection_test.json")
 
     today = date.today()
     start = today - timedelta(days=TEST_DAYS - 1)
@@ -252,7 +262,7 @@ def main() -> None:
         handle.write("\n")
 
     LOG.info("Created %s (%d bytes)", OUTPUT_FILE, OUTPUT_FILE.stat().st_size)
-    upload_to_dropbox()
+    upload_to_dropbox(OUTPUT_FILE, "/garmin_test.json")
     LOG.info("Activities: %d; Garmin requests: %d",
              len(export["activities"]), cli.request_count)
 
