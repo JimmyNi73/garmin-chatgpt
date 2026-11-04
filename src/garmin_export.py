@@ -298,9 +298,9 @@ def main() -> None:
     export["metadata"]["export_status"] = (
         "complete" if not source_errors else "partial"
     )
-    with OUTPUT_FILE.open("w", encoding="utf-8", newline="\\n") as handle:
+    with OUTPUT_FILE.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(export, handle, ensure_ascii=False, indent=2)
-        handle.write("\\n")
+        handle.write("\n")
 
     LOG.info("Created %s (%d bytes)", OUTPUT_FILE, OUTPUT_FILE.stat().st_size)
     # Upload even when optional Garmin sources failed; the JSON records each failure.
