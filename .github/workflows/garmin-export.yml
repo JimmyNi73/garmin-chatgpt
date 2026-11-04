@@ -32,10 +32,10 @@ jobs:
 
       - name: Export Garmin data
         env:
-          GARMIN_PERSONAL_API_KEY: \${{ secrets.GARMIN_PERSONAL_API_KEY }}
-          DROPBOX_APP_KEY: \${{ secrets.DROPBOX_APP_KEY }}
-          DROPBOX_APP_SECRET: \${{ secrets.DROPBOX_APP_SECRET }}
-          DROPBOX_REFRESH_TOKEN: \${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
           GARMIN_REQUEST_PAUSE_SECONDS: "1"
           GARMIN_BATCH_PAUSE_SECONDS: "20"
           GARMIN_MAX_RETRIES: "8"
