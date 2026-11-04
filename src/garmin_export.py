@@ -96,6 +96,16 @@ def dbx_client() -> dropbox.Dropbox:
     )
 
 
+def dropbox_file_exists(dbx: dropbox.Dropbox, path: str) -> bool:
+    try:
+        dbx.files_get_metadata(path)
+        return True
+    except dropbox.exceptions.ApiError as exc:
+        if exc.error.is_path() and exc.error.get_path().is_not_found():
+            return False
+        raise
+
+
 def read_dropbox(dbx: dropbox.Dropbox, path: str) -> dict[str, Any] | None:
     try:
         _, response = dbx.files_download(path)
@@ -345,8 +355,8 @@ def main() -> None:
     cli = GarminCLI()
 
     # History is immutable: create it only if Dropbox confirms it is absent.
-    history = read_dropbox(dbx, HISTORY_PATH)
-    if history is None:
+    history_exists = dropbox_file_exists(dbx, HISTORY_PATH)
+    if not history_exists:
         LOG.info("History file is absent; generating it once.")
         history = build_history(cli, today)
         upload_json(dbx, HISTORY_PATH, history)
