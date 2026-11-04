@@ -18,6 +18,9 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import dropbox
+from dropbox.files import WriteMode
+
 LOG = logging.getLogger("garmin_export")
 OUTPUT_DIR = Path("export")
 OUTPUT_FILE = OUTPUT_DIR / "garmin_test.json"
@@ -108,6 +111,36 @@ def date_index(value: Any) -> dict[str, Any]:
 def activity_key(item: dict[str, Any]) -> str | None:
     value = item.get("activityId", item.get("activity_id", item.get("id")))
     return str(value) if value is not None else None
+
+
+
+def upload_to_dropbox() -> None:
+    """Upload the completed test export to this app's Dropbox folder."""
+    required = ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN")
+    missing = [name for name in required if not os.getenv(name)]
+    if missing:
+        raise RuntimeError("Missing Dropbox GitHub secret(s): " + ", ".join(missing))
+
+    dbx = dropbox.Dropbox(
+        oauth2_refresh_token=os.environ["DROPBOX_REFRESH_TOKEN"],
+        app_key=os.environ["DROPBOX_APP_KEY"],
+        app_secret=os.environ["DROPBOX_APP_SECRET"],
+        timeout=120,
+    )
+    account = dbx.users_get_current_account()
+    destination = "/garmin_test.json"
+    metadata = dbx.files_upload(
+        OUTPUT_FILE.read_bytes(),
+        destination,
+        mode=WriteMode.overwrite,
+        mute=True,
+    )
+    LOG.info(
+        "Uploaded %s for Dropbox account %s (file id: %s)",
+        metadata.path_display or destination,
+        account.email,
+        metadata.id,
+    )
 
 
 def main() -> None:
@@ -217,6 +250,7 @@ def main() -> None:
         handle.write("\n")
 
     LOG.info("Created %s (%d bytes)", OUTPUT_FILE, OUTPUT_FILE.stat().st_size)
+    upload_to_dropbox()
     LOG.info("Activities: %d; Garmin requests: %d",
              len(export["activities"]), cli.request_count)
 
