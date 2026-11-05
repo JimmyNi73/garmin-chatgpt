@@ -179,6 +179,9 @@ def activity_records_resumable(
     completed = progress.get("activities", {})
     if not isinstance(completed, dict):
         completed = {}
+    expected_ids = {activity_id(x) for x in summaries if activity_id(x)}
+    # Ignore stale checkpoint records that are not part of the current Garmin index.
+    completed = {aid: row for aid, row in completed.items() if aid in expected_ids}
     failed: dict[str, str] = {}
     newly_completed = 0
 
@@ -237,9 +240,9 @@ def activity_records_resumable(
             f"{len(failed)} activities failed after 3 attempts; "
             f"{len(completed)}/{len(summaries)} saved for resume"
         )
-    if len(completed) < len(summaries):
+    if set(completed) != expected_ids:
         raise HistoryIncomplete(
-            f"Only {len(completed)}/{len(summaries)} activities completed; resume required"
+            f"Only {len(completed)}/{len(expected_ids)} indexed activities completed; resume required"
         )
     return list(completed.values())
 
@@ -418,7 +421,8 @@ def activity_records(cli: GarminCLI, summaries: list[dict[str, Any]]) -> list[di
         else: raise RuntimeError(f"Activity {aid} failed after 3 attempts: {error}")
     return records
 def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | None) -> dict[str, Any]:
-    activity_start = (today - timedelta(days=CURRENT_ACTIVITY_DAYS - 1) if old_current else CURRENT_START)
+    activity_start = (today - timedelta(days=CURRENT_ACTIVITY_DAYS - 1)
+                      if old_current else date(today.year, 1, 1))
     range_start = today - timedelta(days=RANGE_DAYS - 1)
     daily_start = today - timedelta(days=DAILY_DETAIL_DAYS - 1)
     errors: list[dict[str, str]] = []
