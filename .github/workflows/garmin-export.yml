@@ -33,6 +33,9 @@ jobs:
       - name: Install Garmin client
         run: python -m pip install --upgrade garmin-connect-personal-api-python dropbox
 
+      - name: Validate Python syntax
+        run: python -m py_compile src/garmin_export.py
+
       - name: Export Garmin data
         env:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
