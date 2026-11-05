@@ -20,12 +20,13 @@ from dropbox.files import WriteMode
 
 LOG = logging.getLogger("garmin_export")
 TZ = ZoneInfo("Europe/Stockholm")
-DROPBOX_DIR = "/Appar/GarminChatGPT"
-BACKUP_HISTORY_PATH = f"{DROPBOX_DIR}/Backup/garmin_history.json"
-HISTORY_DIR = f"{DROPBOX_DIR}/History"
-CURRENT_DIR = f"{DROPBOX_DIR}/Current"
+# Dropbox OAuth app uses an app-folder root: "/" is already the GarminChatGPT app folder.
+# Dropbox UI displays this under Apps/GarminChatGPT, but SDK paths are relative to it.
+BACKUP_HISTORY_PATH = "/Backup/garmin_history.json"
+HISTORY_DIR = "/History"
+CURRENT_DIR = "/Current"
 CURRENT_PATH = f"{CURRENT_DIR}/garmin_current.json"
-HISTORY_PROGRESS_PATH = f"{DROPBOX_DIR}/garmin_history_progress.json"
+HISTORY_PROGRESS_PATH = "/garmin_history_progress.json"
 CURRENT_START = date(2025, 1, 1)
 OUTPUT_DIR = Path("export")
 PAGE_SIZE = 100
