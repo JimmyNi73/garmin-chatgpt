@@ -441,7 +441,7 @@ def save_monthly_history_file(dbx: dropbox.Dropbox, month: str,
         if old_ids != {activity_id(x.get("summary", {})) for x in rows}:
             raise RuntimeError(f"Existing {path} differs from Garmin; refusing overwrite")
         return
-    data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\\n"
+    data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
     dbx.files_upload(data, path, mode=WriteMode.add, mute=True)
     LOG.info("Created %s (%d activities, %d bytes)", path, len(rows), len(data))
 
