@@ -515,7 +515,7 @@ def main() -> None:
     current["metadata"]["export_status"] = "complete" if not current.get("source_errors") else "partial"
     current["metadata"]["garmin_api_requests"] = cli.request_count
 
-    encoded = json.dumps(current, ensure_ascii=False, indent=2).encode("utf-8") + b"\\n"
+    encoded = json.dumps(current, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
     max_bytes = 4 * 1024 * 1024
     if len(encoded) > max_bytes:
         raise RuntimeError(
