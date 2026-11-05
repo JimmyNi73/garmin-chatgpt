@@ -247,58 +247,6 @@ def activity_records_resumable(
     return list(completed.values())
 
 
-def migrate_backup_history(dbx: dropbox.Dropbox) -> None:
-    if not dropbox_file_exists(dbx, BACKUP_HISTORY_PATH): raise RuntimeError("Backup history file missing")
-    source = read_dropbox(dbx, BACKUP_HISTORY_PATH)
-    if not source or not isinstance(source.get("activities"), list) or not source["activities"]:
-        raise RuntimeError("Backup history has no valid activities")
-    groups: dict[int, list[dict[str, Any]]] = {}
-    current_rows = []
-    for row in source["activities"]:
-        if not isinstance(row, dict): raise RuntimeError("Invalid activity record")
-        summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
-        detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
-        raw = next((o[k] for o in (summary, detail, row) for k in ("startTimeLocal", "startTimeGMT", "start_time", "startTime") if o.get(k)), None)
-        if raw is None: raise RuntimeError(f"Activity {activity_id(summary)} has no date")
-        try:
-            if isinstance(raw, (int, float)):
-                d = datetime.fromtimestamp(raw / (1000 if raw > 10**11 else 1), timezone.utc).date()
-            else:
-                d = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
-        except (ValueError, TypeError, OverflowError):
-            raise RuntimeError(f"Unparseable activity date: {raw}")
-        (groups.setdefault(d.year, []) if d.year <= 2024 else current_rows).append(row)
-    paths = [f"{HISTORY_DIR}/garmin_history_{y}.json" for y in groups] + [CURRENT_PATH]
-    for path in paths:
-        if dropbox_file_exists(dbx, path):
-            existing = read_dropbox(dbx, path)
-            expected = current_rows if path == CURRENT_PATH else groups[int(path.rsplit("_", 1)[1].split(".")[0])]
-            actual_rows = existing.get("activities", []) if existing else []
-            expected_ids = {activity_id(x.get("summary", {})) for x in expected}
-            actual_ids = {activity_id(x.get("summary", {})) for x in actual_rows if isinstance(x, dict)}
-            valid = expected_ids.issubset(actual_ids) if path == CURRENT_PATH else expected_ids == actual_ids
-            if not valid:
-                raise RuntimeError(f"Existing destination is missing or differs from backup activities: {path}")
-    for year, rows in sorted(groups.items()):
-        path = f"{HISTORY_DIR}/garmin_history_{year}.json"
-        if dropbox_file_exists(dbx, path):
-            LOG.info("Verified existing annual file %s", path)
-            continue
-        payload = {"schema_version": 1, "metadata": {"file_role": "immutable_activity_history", "activity_count": len(rows), "export_status": "complete"},
-                   "period": {"start_date": f"{year}-01-01", "end_date": f"{year}-12-31"}, "profile": source.get("profile"),
-                   "heart_rate_zones": source.get("heart_rate_zones"), "activities": rows}
-        dbx.files_upload(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"), path, mode=WriteMode.add, mute=True)
-        LOG.info("Created %s: %d activities", path, len(rows))
-    current = {"schema_version": 1, "metadata": {"file_role": "rolling_current_data", "activity_count": len(current_rows), "export_status": "complete"},
-               "period": {"start_date": "2025-01-01", "end_date": datetime.now(TZ).date().isoformat()},
-               "profile": source.get("profile"), "heart_rate_zones": source.get("heart_rate_zones"), "source_status": {"backup_seed": "ok"},
-               "source_errors": [], "activities": current_rows, "daily": {"range_data": {}, "by_date": {}}}
-    if not dropbox_file_exists(dbx, CURRENT_PATH):
-        dbx.files_upload(json.dumps(current, ensure_ascii=False, indent=2).encode("utf-8"), CURRENT_PATH, mode=WriteMode.add, mute=True)
-    else:
-        LOG.info("Verified existing Current file against backup")
-    if sum(map(len, groups.values())) + len(current_rows) != len(source["activities"]): raise RuntimeError("Migration count mismatch")
-    LOG.info("Backup migration verified: %d activities", len(source["activities"]))
 def date_index(value: Any) -> dict[str, Any]:
     rows: list[tuple[str | None, Any]] = []
     if isinstance(value, list):
@@ -420,14 +368,18 @@ def activity_records(cli: GarminCLI, summaries: list[dict[str, Any]]) -> list[di
                 if attempt < 3: time.sleep(5 * attempt)
         else: raise RuntimeError(f"Activity {aid} failed after 3 attempts: {error}")
     return records
-def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | None) -> dict[str, Any]:
+def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | None,
+                  activity_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     activity_start = (today - timedelta(days=CURRENT_ACTIVITY_DAYS - 1)
                       if old_current else date(today.year, 1, 1))
     range_start = today - timedelta(days=RANGE_DAYS - 1)
     daily_start = today - timedelta(days=DAILY_DETAIL_DAYS - 1)
     errors: list[dict[str, str]] = []
-    summaries = fetch_activities(cli, activity_start.isoformat(), today.isoformat())
-    activities = activity_records(cli, summaries)
+    if activity_rows is None:
+        summaries = fetch_activities(cli, activity_start.isoformat(), today.isoformat())
+        activities = activity_records(cli, summaries)
+    else:
+        activities = activity_rows
     current: dict[str, Any] = {
         "schema_version": 1,
         "metadata": {
@@ -610,10 +562,10 @@ def main() -> None:
         if not old_start.startswith(f"{current_year}-"):
             old_current = None
 
-    current = build_current(cli, today, old_current)
-    current["activities"] = sorted(
+    current_year_rows = sorted(
         by_year.get(current_year, []),
         key=lambda x: str(x.get("summary", {}).get("startTimeLocal", "")))
+    current = build_current(cli, today, old_current, current_year_rows)
     current["period"]["start_date"] = f"{current_year}-01-01"
     current["period"]["end_date"] = today.isoformat()
     current["metadata"]["activity_count"] = len(current["activities"])
