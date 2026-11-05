@@ -1,0 +1,22 @@
+name: Validate Garmin exporter
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/garmin_export.py"
+      - ".github/workflows/validate-garmin-export.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate Python syntax
+        run: python -m py_compile src/garmin_export.py
