@@ -564,8 +564,12 @@ def main() -> None:
         by_year.get(current_year, []),
         key=lambda x: str(x.get("summary", {}).get("startTimeLocal", "")))
     current = build_current(cli, today, old_current, current_year_rows)
+    # Preserve previously collected daily dates that fall outside the rolling
+    # detail window; the activity list itself is already the complete year-to-date set.
+    current = merge_current(old_current, current)
     current["period"]["start_date"] = f"{current_year}-01-01"
     current["period"]["end_date"] = today.isoformat()
+    current["metadata"]["activity_window_days"] = (today - date(current_year, 1, 1)).days + 1
     current["metadata"]["activity_count"] = len(current["activities"])
     current["metadata"]["source"] = "Garmin Connect"
     current["metadata"]["export_status"] = "complete" if not current.get("source_errors") else "partial"
