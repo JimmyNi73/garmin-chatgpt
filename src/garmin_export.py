@@ -492,6 +492,8 @@ def main() -> None:
     old_current = read_dropbox(dbx, CURRENT_PATH)
     current = build_current(cli, today, old_current)
     current = merge_current(old_current, current)
+    current["period"]["start_date"] = CURRENT_START.isoformat()
+    current["metadata"]["activity_count"] = len(current.get("activities", []))
     current["metadata"]["updated_at"] = datetime.now(timezone.utc).isoformat()
     if current.get("source_errors"): raise RuntimeError(f"Current data has {len(current['source_errors'])} source errors; refusing upload")
     upload_json(dbx, CURRENT_PATH, current)
