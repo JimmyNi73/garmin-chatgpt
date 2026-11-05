@@ -516,10 +516,11 @@ def main() -> None:
     current["metadata"]["garmin_api_requests"] = cli.request_count
 
     encoded = json.dumps(current, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
-    max_bytes = 4 * 1024 * 1024
+    # Dropbox files_upload supports files up to 150 MB; keep a conservative 100 MiB guard.
+    max_bytes = 100 * 1024 * 1024
     if len(encoded) > max_bytes:
         raise RuntimeError(
-            f"Current export is {len(encoded)} bytes, above the 4 MiB safety limit; "
+            f"Current export is {len(encoded)} bytes, above the 100 MiB safety limit; "
             "refusing upload"
         )
     upload_json(dbx, CURRENT_PATH, current)
