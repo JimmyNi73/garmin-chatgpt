@@ -256,24 +256,39 @@ def migrate_backup_history(dbx: dropbox.Dropbox) -> None:
         detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
         raw = next((o[k] for o in (summary, detail, row) for k in ("startTimeLocal", "startTimeGMT", "start_time", "startTime") if o.get(k)), None)
         if raw is None: raise RuntimeError(f"Activity {activity_id(summary)} has no date")
-        try: d = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
-        except ValueError: raise RuntimeError(f"Unparseable activity date: {raw}")
+        try:
+            if isinstance(raw, (int, float)):
+                d = datetime.fromtimestamp(raw / (1000 if raw > 10**11 else 1), timezone.utc).date()
+            else:
+                d = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
+        except (ValueError, TypeError, OverflowError):
+            raise RuntimeError(f"Unparseable activity date: {raw}")
         (groups.setdefault(d.year, []) if d.year <= 2024 else current_rows).append(row)
     paths = [f"{HISTORY_DIR}/garmin_history_{y}.json" for y in groups] + [CURRENT_PATH]
     for path in paths:
-        if dropbox_file_exists(dbx, path): raise RuntimeError(f"Destination exists; refusing overwrite: {path}")
+        if dropbox_file_exists(dbx, path):
+            existing = read_dropbox(dbx, path)
+            expected = current_rows if path == CURRENT_PATH else groups[int(path.rsplit("_", 1)[1].split(".")[0])]
+            if not existing or existing.get("activities") != expected:
+                raise RuntimeError(f"Existing destination differs from backup; refusing overwrite: {path}")
     for year, rows in sorted(groups.items()):
+        path = f"{HISTORY_DIR}/garmin_history_{year}.json"
+        if dropbox_file_exists(dbx, path):
+            LOG.info("Verified existing annual file %s", path)
+            continue
         payload = {"schema_version": 1, "metadata": {"file_role": "immutable_activity_history", "activity_count": len(rows), "export_status": "complete"},
                    "period": {"start_date": f"{year}-01-01", "end_date": f"{year}-12-31"}, "profile": source.get("profile"),
                    "heart_rate_zones": source.get("heart_rate_zones"), "activities": rows}
-        path = f"{HISTORY_DIR}/garmin_history_{year}.json"
         dbx.files_upload(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"), path, mode=WriteMode.add, mute=True)
         LOG.info("Created %s: %d activities", path, len(rows))
     current = {"schema_version": 1, "metadata": {"file_role": "rolling_current_data", "activity_count": len(current_rows), "export_status": "complete"},
                "period": {"start_date": "2025-01-01", "end_date": datetime.now(TZ).date().isoformat()},
                "profile": source.get("profile"), "heart_rate_zones": source.get("heart_rate_zones"), "source_status": {"backup_seed": "ok"},
                "source_errors": [], "activities": current_rows, "daily": {"range_data": {}, "by_date": {}}}
-    dbx.files_upload(json.dumps(current, ensure_ascii=False, indent=2).encode("utf-8"), CURRENT_PATH, mode=WriteMode.add, mute=True)
+    if not dropbox_file_exists(dbx, CURRENT_PATH):
+        dbx.files_upload(json.dumps(current, ensure_ascii=False, indent=2).encode("utf-8"), CURRENT_PATH, mode=WriteMode.add, mute=True)
+    else:
+        LOG.info("Verified existing Current file against backup")
     if sum(map(len, groups.values())) + len(current_rows) != len(source["activities"]): raise RuntimeError("Migration count mismatch")
     LOG.info("Backup migration verified: %d activities", len(source["activities"]))
 def date_index(value: Any) -> dict[str, Any]:
@@ -469,8 +484,7 @@ def main() -> None:
     today = datetime.now(TZ).date()
     cli = GarminCLI()
 
-    if not dropbox_file_exists(dbx, CURRENT_PATH):
-        migrate_backup_history(dbx)
+    migrate_backup_history(dbx)
     old_current = read_dropbox(dbx, CURRENT_PATH)
     current = build_current(cli, today, old_current)
     current = merge_current(old_current, current)
