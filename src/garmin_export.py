@@ -23,6 +23,7 @@ TZ = ZoneInfo("Europe/Stockholm")
 DROPBOX_DIR = "/Appar/GarminChatGPT"
 HISTORY_PATH = f"{DROPBOX_DIR}/garmin_history.json"
 CURRENT_PATH = f"{DROPBOX_DIR}/garmin_current.json"
+HISTORY_PROGRESS_PATH = f"{DROPBOX_DIR}/garmin_history_progress.json"
 OUTPUT_DIR = Path("export")
 PAGE_SIZE = 100
 REQUEST_PAUSE = float(os.getenv("GARMIN_REQUEST_PAUSE_SECONDS", "1"))
@@ -163,19 +164,80 @@ def fetch_activities(cli: GarminCLI, start: str, end: str) -> list[dict[str, Any
     return list(found.values())
 
 
-def activity_records(cli: GarminCLI, summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    records = []
+class HistoryIncomplete(RuntimeError):
+    """History export has retryable failed activities and must resume later."""
+
+
+def activity_records_resumable(
+    cli: GarminCLI, summaries: list[dict[str, Any]], dbx: dropbox.Dropbox
+) -> list[dict[str, Any]]:
+    progress = read_dropbox(dbx, HISTORY_PROGRESS_PATH) or {}
+    completed = progress.get("activities", {})
+    if not isinstance(completed, dict):
+        completed = {}
+    failed: dict[str, str] = {}
+    newly_completed = 0
+
+    LOG.info("History resume: %d/%d activities already completed",
+             len(completed), len(summaries))
+
     for i, summary in enumerate(summaries, 1):
         aid = activity_id(summary)
-        if not aid:
+        if not aid or aid in completed:
             continue
-        detail = cli.run(f"activity {aid}", "activity", aid)
-        workouts = cli.run(f"activity-workouts {aid}", "activity-workouts", aid)
-        records.append({"summary": summary, "detail": detail, "workouts": workouts})
+
+        last_error = ""
+        for attempt in range(1, 4):
+            try:
+                detail = cli.run(f"activity {aid}", "activity", aid)
+                workouts = cli.run(f"activity-workouts {aid}",
+                                   "activity-workouts", aid)
+                completed[aid] = {
+                    "summary": summary, "detail": detail, "workouts": workouts
+                }
+                newly_completed += 1
+                failed.pop(aid, None)
+                break
+            except Exception as exc:
+                last_error = str(exc)
+                LOG.warning("Activity %s failed (attempt %d/3): %s",
+                            aid, attempt, last_error)
+                if attempt < 3:
+                    time.sleep(5 * attempt)
+        else:
+            failed[aid] = last_error
+            LOG.error("Skipping activity %s after 3 attempts; will retry next run", aid)
+
+        if newly_completed and newly_completed % 25 == 0:
+            upload_json(dbx, HISTORY_PROGRESS_PATH, {
+                "schema_version": 1,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "activities": completed,
+            })
+            LOG.info("History checkpoint saved: %d/%d activities",
+                     len(completed), len(summaries))
         if i % 15 == 0:
-            LOG.info("Activity details: %d/%d", i, len(summaries))
+            LOG.info("History details processed: %d/%d; completed %d; failed %d",
+                     i, len(summaries), len(completed), len(failed))
             time.sleep(BATCH_PAUSE)
-    return records
+
+    # Always checkpoint at the end, including failures, so successful work survives.
+    upload_json(dbx, HISTORY_PROGRESS_PATH, {
+        "schema_version": 1,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "activities": completed,
+    })
+
+    if failed:
+        raise HistoryIncomplete(
+            f"{len(failed)} activities failed after 3 attempts; "
+            f"{len(completed)}/{len(summaries)} saved for resume"
+        )
+    if len(completed) < len(summaries):
+        raise HistoryIncomplete(
+            f"Only {len(completed)}/{len(summaries)} activities completed; resume required"
+        )
+    return list(completed.values())
 
 
 def date_index(value: Any) -> dict[str, Any]:
@@ -255,12 +317,12 @@ def merge_current(old: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, 
     return new
 
 
-def build_history(cli: GarminCLI, today: date) -> dict[str, Any]:
+def build_history(cli: GarminCLI, today: date, dbx: dropbox.Dropbox) -> dict[str, Any]:
     start = "2000-01-01"
     end = today.isoformat()
     LOG.info("Creating history from %s through %s", start, end)
     summaries = fetch_activities(cli, start, end)
-    records = activity_records(cli, summaries)
+    records = activity_records_resumable(cli, summaries, dbx)
     errors: list[dict[str, str]] = []
     profile_ok, profile = optional(cli, errors, "profile-settings", "profile-settings")
     zones_ok, zones = optional(cli, errors, "heart-rate-zones", "heart-rate-zones")
@@ -358,8 +420,16 @@ def main() -> None:
     history_exists = dropbox_file_exists(dbx, HISTORY_PATH)
     if not history_exists:
         LOG.info("History file is absent; generating it once.")
-        history = build_history(cli, today)
-        upload_json(dbx, HISTORY_PATH, history)
+        try:
+            history = build_history(cli, today, dbx)
+            upload_json(dbx, HISTORY_PATH, history)
+            try:
+                dbx.files_delete_v2(HISTORY_PROGRESS_PATH)
+                LOG.info("Removed completed history checkpoint.")
+            except dropbox.exceptions.ApiError:
+                pass
+        except HistoryIncomplete as exc:
+            LOG.warning("History is not complete yet; checkpoint retained: %s", exc)
     else:
         LOG.info("History file already exists; leaving it untouched.")
 
