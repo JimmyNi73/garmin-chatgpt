@@ -269,8 +269,12 @@ def migrate_backup_history(dbx: dropbox.Dropbox) -> None:
         if dropbox_file_exists(dbx, path):
             existing = read_dropbox(dbx, path)
             expected = current_rows if path == CURRENT_PATH else groups[int(path.rsplit("_", 1)[1].split(".")[0])]
-            if not existing or existing.get("activities") != expected:
-                raise RuntimeError(f"Existing destination differs from backup; refusing overwrite: {path}")
+            actual_rows = existing.get("activities", []) if existing else []
+            expected_ids = {activity_id(x.get("summary", {})) for x in expected}
+            actual_ids = {activity_id(x.get("summary", {})) for x in actual_rows if isinstance(x, dict)}
+            valid = expected_ids.issubset(actual_ids) if path == CURRENT_PATH else expected_ids == actual_ids
+            if not valid:
+                raise RuntimeError(f"Existing destination is missing or differs from backup activities: {path}")
     for year, rows in sorted(groups.items()):
         path = f"{HISTORY_DIR}/garmin_history_{year}.json"
         if dropbox_file_exists(dbx, path):
