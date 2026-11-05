@@ -504,6 +504,34 @@ def save_annual_file(dbx: dropbox.Dropbox, year: int,
     LOG.info("Created %s (%d activities, %d bytes)", path, len(rows), len(data))
 
 
+def verify_existing_annual_file(dbx: dropbox.Dropbox, year: int,
+                                summaries: list[dict[str, Any]]) -> bool:
+    """Return True only when an existing annual archive matches Garmin's index."""
+    path = f"{HISTORY_DIR}/garmin_history_{year}.json"
+    if not dropbox_file_exists(dbx, path):
+        return False
+    existing = read_dropbox(dbx, path)
+    if not existing or existing.get("metadata", {}).get("export_status") != "complete":
+        raise RuntimeError(f"Existing {path} is not marked complete; refusing to overwrite")
+    rows = existing.get("activities")
+    if not isinstance(rows, list):
+        raise RuntimeError(f"Existing {path} has no valid activities array")
+    existing_ids = [activity_id(x.get("summary", {})) for x in rows
+                    if isinstance(x, dict) and isinstance(x.get("summary"), dict)]
+    expected_ids = [activity_id(x) for x in summaries]
+    if (None in existing_ids or len(existing_ids) != len(rows)
+            or len(existing_ids) != len(set(existing_ids))
+            or set(existing_ids) != set(expected_ids)):
+        raise RuntimeError(
+            f"Existing {path} does not match Garmin's activity index "
+            f"(archive={len(existing_ids)}, Garmin={len(expected_ids)}); "
+            "refusing automatic overwrite"
+        )
+    LOG.info("YEAR %d: existing archive verified; skipping detail downloads (%d activities)",
+             year, len(expected_ids))
+    return True
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -521,51 +549,70 @@ def main() -> None:
     today = datetime.now(TZ).date()
     current_year = today.year
     cli = GarminCLI()
+    archived_years: list[int] = []
+    skipped_years: list[int] = []
 
-    # The Backup file is deliberately not read, migrated, or modified.
-    LOG.info("Fetching complete Garmin activity index from 2000-01-01 through %s",
-             today.isoformat())
-    summaries = fetch_activities(cli, "2000-01-01", today.isoformat())
-    if not summaries:
-        raise RuntimeError("Garmin returned zero activities; refusing to publish empty exports")
-    summary_ids = [activity_id(x) for x in summaries]
-    if any(x is None for x in summary_ids) or len(summary_ids) != len(set(summary_ids)):
-        raise RuntimeError("Garmin activity index contains missing or duplicate IDs")
+    # Each historical year is a separate transaction: fetch its index, fetch all
+    # details, validate, then publish before touching the next year.
+    for year in range(2000, current_year):
+        start_date = date(year, 1, 1)
+        end_date = date(year, 12, 31)
+        LOG.info("YEAR %d: starting activity index fetch (%s to %s)",
+                 year, start_date.isoformat(), end_date.isoformat())
+        summaries = fetch_activities(cli, start_date.isoformat(), end_date.isoformat())
+        ids = [activity_id(x) for x in summaries]
+        if any(x is None for x in ids) or len(ids) != len(set(ids)):
+            raise RuntimeError(f"YEAR {year}: Garmin index contains missing or duplicate activity IDs")
 
-    records = activity_records_resumable(cli, summaries, dbx)
-    by_year: dict[int, list[dict[str, Any]]] = {}
-    for row in records:
-        year = year_of_activity(row)
-        if year > current_year:
-            raise RuntimeError(f"Garmin returned a future-dated activity in {year}")
-        by_year.setdefault(year, []).append(row)
+        if not summaries:
+            LOG.info("YEAR %d: no activities; no archive file required", year)
+            continue
+        if verify_existing_annual_file(dbx, year, summaries):
+            skipped_years.append(year)
+            continue
 
-    # All details must be fetched before any year can be marked complete.
-    profile_ok, profile = optional(cli, [], "profile-settings", "profile-settings")
-    zones_ok, zones = optional(cli, [], "heart-rate-zones", "heart-rate-zones")
-    if not profile_ok:
-        LOG.warning("Profile settings unavailable; continuing with null profile.")
-    if not zones_ok:
-        LOG.warning("Heart-rate zones unavailable; continuing with null zones.")
+        LOG.info("YEAR %d: downloading details for %d activities",
+                 year, len(summaries))
+        records = activity_records(cli, summaries)
+        record_ids = [activity_id(x.get("summary", {})) for x in records]
+        if (len(records) != len(summaries) or None in record_ids
+                or len(record_ids) != len(set(record_ids))
+                or set(record_ids) != set(ids)):
+            raise RuntimeError(f"YEAR {year}: detail export incomplete; annual file not published")
 
-    for year in sorted(y for y in by_year if y < current_year):
-        save_annual_file(dbx, year, by_year[year], profile, zones)
+        errors: list[dict[str, str]] = []
+        profile_ok, profile = optional(cli, errors, f"profile-settings {year}", "profile-settings")
+        zones_ok, zones = optional(cli, errors, f"heart-rate-zones {year}", "heart-rate-zones")
+        if not profile_ok or not zones_ok:
+            LOG.warning("YEAR %d: profile/zone metadata partially unavailable; activity data is complete",
+                        year)
+        save_annual_file(dbx, year, records,
+                         profile if profile_ok else None,
+                         zones if zones_ok else None)
+        archived_years.append(year)
+        LOG.info("YEAR %d: published and verified (%d activities)", year, len(records))
 
-    # Current contains this calendar year only. Keep prior current-year daily
-    # metrics where possible, but never carry activities across a year boundary.
+    # Current year is deliberately separate and contains year-to-date activities.
+    LOG.info("CURRENT %d: fetching year-to-date activity index", current_year)
+    current_summaries = fetch_activities(
+        cli, date(current_year, 1, 1).isoformat(), today.isoformat())
+    current_ids = [activity_id(x) for x in current_summaries]
+    if any(x is None for x in current_ids) or len(current_ids) != len(set(current_ids)):
+        raise RuntimeError("CURRENT: Garmin index contains missing or duplicate activity IDs")
+    LOG.info("CURRENT %d: downloading details for %d activities",
+             current_year, len(current_summaries))
+    current_rows = activity_records(cli, current_summaries)
+    row_ids = [activity_id(x.get("summary", {})) for x in current_rows]
+    if (len(current_rows) != len(current_summaries) or None in row_ids
+            or len(row_ids) != len(set(row_ids)) or set(row_ids) != set(current_ids)):
+        raise RuntimeError("CURRENT: activity detail export incomplete; refusing upload")
+
     old_current = read_dropbox(dbx, CURRENT_PATH)
     if old_current:
         old_period = old_current.get("period", {})
-        old_start = str(old_period.get("start_date", ""))
-        if not old_start.startswith(f"{current_year}-"):
+        if not str(old_period.get("start_date", "")).startswith(f"{current_year}-"):
             old_current = None
-
-    current_year_rows = sorted(
-        by_year.get(current_year, []),
-        key=lambda x: str(x.get("summary", {}).get("startTimeLocal", "")))
-    current = build_current(cli, today, old_current, current_year_rows)
-    # Preserve previously collected daily dates that fall outside the rolling
-    # detail window; the activity list itself is already the complete year-to-date set.
+    current = build_current(cli, today, old_current, current_rows)
     current = merge_current(old_current, current)
     current["period"]["start_date"] = f"{current_year}-01-01"
     current["period"]["end_date"] = today.isoformat()
@@ -575,19 +622,18 @@ def main() -> None:
     current["metadata"]["export_status"] = "complete" if not current.get("source_errors") else "partial"
     current["metadata"]["garmin_api_requests"] = cli.request_count
 
-    encoded = json.dumps(current, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+    encoded = json.dumps(current, ensure_ascii=False, indent=2).encode("utf-8") + b"\\n"
     max_bytes = 4 * 1024 * 1024
     if len(encoded) > max_bytes:
         raise RuntimeError(
             f"Current export is {len(encoded)} bytes, above the 4 MiB safety limit; "
             "refusing upload"
         )
-    # Optional wellness endpoint failures are recorded, but do not discard
-    # successfully retrieved activity data.
     upload_json(dbx, CURRENT_PATH, current)
-    LOG.info("Finished. Years archived: %s; current year %d activities: %d; "
-             "Garmin requests: %d",
-             ", ".join(map(str, sorted(y for y in by_year if y < current_year))),
+    LOG.info("Finished. Newly archived years: %s; verified/skipped years: %s; "
+             "current year %d activities: %d; Garmin requests: %d",
+             ", ".join(map(str, archived_years)) or "none",
+             ", ".join(map(str, skipped_years)) or "none",
              current_year, len(current["activities"]), cli.request_count)
 
 
