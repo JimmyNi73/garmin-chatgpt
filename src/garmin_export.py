@@ -324,7 +324,7 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
 
 def ensure_dropbox_folders(dbx: dropbox.Dropbox) -> None:
     """Require the user's existing folders; never create Dropbox folders."""
-    for path in ("/Backup", HISTORY_DIR, CURRENT_DIR):
+    for path in (HISTORY_DIR, CURRENT_DIR):
         try:
             metadata = dbx.files_get_metadata(path)
         except dropbox.exceptions.ApiError as exc:
@@ -333,7 +333,7 @@ def ensure_dropbox_folders(dbx: dropbox.Dropbox) -> None:
             raise RuntimeError(f"Expected a Dropbox folder at {path}")
 
 
-def year_of_activity(row: dict[str, Any]) -> int:
+def activity_datetime(row: dict[str, Any]) -> datetime:
     summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
     detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
     raw = next((obj[key] for obj in (summary, detail, row)
@@ -344,13 +344,32 @@ def year_of_activity(row: dict[str, Any]) -> int:
     try:
         if isinstance(raw, (int, float)):
             stamp = raw / (1000 if raw > 10**11 else 1)
-            return datetime.fromtimestamp(stamp, timezone.utc).astimezone(TZ).year
+            return datetime.fromtimestamp(stamp, timezone.utc).astimezone(TZ)
         parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            return parsed.year
-        return parsed.astimezone(TZ).year
+        return parsed.replace(tzinfo=TZ) if parsed.tzinfo is None else parsed.astimezone(TZ)
     except (ValueError, TypeError, OverflowError) as exc:
         raise RuntimeError(f"Unparseable activity date: {raw}") from exc
+
+
+def year_of_activity(row: dict[str, Any]) -> int:
+    return activity_datetime(row).year
+
+
+def month_of_activity(row: dict[str, Any]) -> str:
+    return activity_datetime(row).strftime("%Y-%m")
+
+
+def month_bounds(month: str) -> tuple[str, str]:
+    first = date.fromisoformat(month + "-01")
+    following = date(first.year + (first.month == 12), first.month % 12 + 1, 1)
+    return first.isoformat(), (following - timedelta(days=1)).isoformat()
+
+
+def group_by_month(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(month_of_activity(row), []).append(row)
+    return dict(sorted(grouped.items()))
 
 
 def annual_payload(year: int, rows: list[dict[str, Any]], profile: Any,
@@ -372,6 +391,59 @@ def annual_payload(year: int, rows: list[dict[str, Any]], profile: Any,
         "heart_rate_zones": zones,
         "activities": rows,
     }
+
+
+def monthly_payload(month: str, rows: list[dict[str, Any]], profile: Any,
+                    zones: Any, file_role: str) -> dict[str, Any]:
+    ids = [activity_id(x.get("summary", {})) for x in rows]
+    if None in ids or len(ids) != len(set(ids)):
+        raise RuntimeError(f"Invalid or duplicate activity IDs in {month}")
+    start, end = month_bounds(month)
+    return {
+        "schema_version": 1,
+        "metadata": {"file_role": file_role, "created_at": datetime.now(timezone.utc).isoformat(),
+                     "activity_count": len(rows), "export_status": "complete",
+                     "source": "Garmin Connect", "month": month},
+        "period": {"start_date": start, "end_date": end},
+        "profile": profile, "heart_rate_zones": zones, "activities": rows,
+    }
+
+
+def verify_monthly_history_file(dbx: dropbox.Dropbox, month: str,
+                                summaries: list[dict[str, Any]]) -> bool:
+    path = f"{HISTORY_DIR}/garmin_history_{month}.json"
+    if not dropbox_file_exists(dbx, path):
+        return False
+    existing = read_dropbox(dbx, path)
+    if not existing or existing.get("metadata", {}).get("export_status") != "complete":
+        raise RuntimeError(f"Existing {path} is not marked complete; refusing overwrite")
+    rows = existing.get("activities")
+    if not isinstance(rows, list):
+        raise RuntimeError(f"Existing {path} has no valid activities array")
+    old_ids = [activity_id(x.get("summary", {})) for x in rows if isinstance(x, dict)]
+    expected = [activity_id(x) for x in summaries]
+    if (len(old_ids) != len(rows) or None in old_ids or len(old_ids) != len(set(old_ids))
+            or set(old_ids) != set(expected)):
+        raise RuntimeError(f"Existing {path} differs from Garmin; refusing overwrite")
+    LOG.info("MONTH %s: verified existing history; skipping details (%d activities)",
+             month, len(expected))
+    return True
+
+
+def save_monthly_history_file(dbx: dropbox.Dropbox, month: str,
+                              rows: list[dict[str, Any]], profile: Any, zones: Any) -> None:
+    path = f"{HISTORY_DIR}/garmin_history_{month}.json"
+    payload = monthly_payload(month, rows, profile, zones, "immutable_activity_history_monthly")
+    if dropbox_file_exists(dbx, path):
+        existing = read_dropbox(dbx, path) or {}
+        old_ids = {activity_id(x.get("summary", {})) for x in existing.get("activities", [])
+                   if isinstance(x, dict)}
+        if old_ids != {activity_id(x.get("summary", {})) for x in rows}:
+            raise RuntimeError(f"Existing {path} differs from Garmin; refusing overwrite")
+        return
+    data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\\n"
+    dbx.files_upload(data, path, mode=WriteMode.add, mute=True)
+    LOG.info("Created %s (%d activities, %d bytes)", path, len(rows), len(data))
 
 
 def save_annual_file(dbx: dropbox.Dropbox, year: int,
@@ -457,6 +529,25 @@ def main() -> None:
         if any(x is None for x in ids) or len(ids) != len(set(ids)):
             raise RuntimeError(f"YEAR {year}: Garmin index contains missing or duplicate activity IDs")
 
+        if year >= 2026:
+            by_month: dict[str, list[dict[str, Any]]] = {}
+            for summary in summaries:
+                by_month.setdefault(month_of_activity({"summary": summary}), []).append(summary)
+            for month, month_summaries in sorted(by_month.items()):
+                if verify_monthly_history_file(dbx, month, month_summaries):
+                    continue
+                month_rows = activity_records(cli, month_summaries)
+                got = [activity_id(x.get("summary", {})) for x in month_rows]
+                expected = [activity_id(x) for x in month_summaries]
+                if len(got) != len(expected) or None in got or len(got) != len(set(got)) or set(got) != set(expected):
+                    raise RuntimeError(f"MONTH {month}: incomplete details; file not published")
+                errors: list[dict[str, str]] = []
+                p_ok, profile = optional(cli, errors, f"profile-settings {month}", "profile-settings")
+                z_ok, zones = optional(cli, errors, f"heart-rate-zones {month}", "heart-rate-zones")
+                save_monthly_history_file(dbx, month, month_rows,
+                                          profile if p_ok else None, zones if z_ok else None)
+            continue
+
         if verify_existing_annual_file(dbx, year, summaries):
             skipped_years.append(year)
             continue
@@ -500,35 +591,27 @@ def main() -> None:
             or len(row_ids) != len(set(row_ids)) or set(row_ids) != set(current_ids)):
         raise RuntimeError("CURRENT: activity detail export incomplete; refusing upload")
 
-    old_current = read_dropbox(dbx, CURRENT_PATH)
-    if old_current:
-        old_period = old_current.get("period", {})
-        if not str(old_period.get("start_date", "")).startswith(f"{current_year}-"):
-            old_current = None
-    current = build_current(cli, today, old_current, current_rows)
-    current = merge_current(old_current, current)
-    current["period"]["start_date"] = f"{current_year}-01-01"
-    current["period"]["end_date"] = today.isoformat()
-    current["metadata"]["activity_window_days"] = (today - date(current_year, 1, 1)).days + 1
-    current["metadata"]["activity_count"] = len(current["activities"])
-    current["metadata"]["source"] = "Garmin Connect"
-    current["metadata"]["export_status"] = "complete" if not current.get("source_errors") else "partial"
-    current["metadata"]["garmin_api_requests"] = cli.request_count
+    current = build_current(cli, today, None, current_rows)
+    uploaded_months: list[str] = []
+    for month, month_rows in group_by_month(current_rows).items():
+        month_start, month_end = month_bounds(month)
+        monthly = dict(current)
+        monthly["activities"] = month_rows
+        monthly["period"] = {"start_date": month_start,
+                             "end_date": min(date.fromisoformat(month_end), today).isoformat()}
+        monthly["metadata"] = dict(current["metadata"])
+        monthly["metadata"].update({"file_role": "rolling_current_month",
+                                    "month": month, "activity_count": len(month_rows)})
+        path = f"{CURRENT_DIR}/garmin_{month}.json"
+        upload_json(dbx, path, monthly)
+        uploaded_months.append(month)
 
-    encoded = json.dumps(current, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
-    # Dropbox files_upload supports files up to 150 MB; keep a conservative 100 MiB guard.
-    max_bytes = 100 * 1024 * 1024
-    if len(encoded) > max_bytes:
-        raise RuntimeError(
-            f"Current export is {len(encoded)} bytes, above the 100 MiB safety limit; "
-            "refusing upload"
-        )
-    upload_json(dbx, CURRENT_PATH, current)
     LOG.info("Finished. Newly archived years: %s; verified/skipped years: %s; "
-             "current year %d activities: %d; Garmin requests: %d",
+             "current year %d monthly files: %s; activities: %d; Garmin requests: %d",
              ", ".join(map(str, archived_years)) or "none",
              ", ".join(map(str, skipped_years)) or "none",
-             current_year, len(current["activities"]), cli.request_count)
+             current_year, ", ".join(uploaded_months) or "none",
+             len(current_rows), cli.request_count)
 
 
 if __name__ == "__main__":
