@@ -165,10 +165,6 @@ def fetch_activities(cli: GarminCLI, start: str, end: str) -> list[dict[str, Any
     return list(found.values())
 
 
-class HistoryIncomplete(RuntimeError):
-    """History export has retryable failed activities and must resume later."""
-
-
 def date_index(value: Any) -> dict[str, Any]:
     rows: list[tuple[str | None, Any]] = []
     if isinstance(value, list):
@@ -461,11 +457,11 @@ def main() -> None:
         if any(x is None for x in ids) or len(ids) != len(set(ids)):
             raise RuntimeError(f"YEAR {year}: Garmin index contains missing or duplicate activity IDs")
 
-        if not summaries:
-            LOG.info("YEAR %d: no activities; no archive file required", year)
-            continue
         if verify_existing_annual_file(dbx, year, summaries):
             skipped_years.append(year)
+            continue
+        if not summaries:
+            LOG.info("YEAR %d: no activities; no archive file required", year)
             continue
 
         LOG.info("YEAR %d: downloading details for %d activities",
