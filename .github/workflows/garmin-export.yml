@@ -45,9 +45,6 @@ jobs:
           GARMIN_REQUEST_PAUSE_SECONDS: "1"
           GARMIN_BATCH_PAUSE_SECONDS: "20"
           GARMIN_MAX_RETRIES: "8"
-          GARMIN_CURRENT_ACTIVITY_DAYS: "30"
-          GARMIN_RANGE_DAYS: "30"
-          GARMIN_DAILY_DETAIL_DAYS: "14"
         run: python src/garmin_export.py
 
       - name: Close start request
