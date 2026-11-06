@@ -682,6 +682,7 @@ def main() -> None:
     today = datetime.now(TZ).date()
     current_year = today.year
     cli = GarminCLI()
+    gear_registry, activity_to_gear = fetch_gear_data(cli)
     archived_years: list[int] = []
     skipped_years: list[int] = []
 
@@ -705,6 +706,7 @@ def main() -> None:
                 if verify_monthly_history_file(dbx, month, month_summaries):
                     continue
                 month_rows = activity_records(cli, month_summaries)
+                enrich_gear_records(month_rows, gear_registry, activity_to_gear)
                 got = [activity_id(x.get("summary", {})) for x in month_rows]
                 expected = [activity_id(x) for x in month_summaries]
                 if len(got) != len(expected) or None in got or len(got) != len(set(got)) or set(got) != set(expected):
@@ -726,6 +728,7 @@ def main() -> None:
         LOG.info("YEAR %d: downloading details for %d activities",
                  year, len(summaries))
         records = activity_records(cli, summaries)
+        enrich_gear_records(records, gear_registry, activity_to_gear)
         record_ids = [activity_id(x.get("summary", {})) for x in records]
         if (len(records) != len(summaries) or None in record_ids
                 or len(record_ids) != len(set(record_ids))
@@ -760,7 +763,6 @@ def main() -> None:
         raise RuntimeError("CURRENT: activity detail export incomplete; refusing upload")
 
     current = build_current(cli, today, None, current_rows)
-    gear_registry, activity_to_gear = fetch_gear_data(cli)
     enrich_gear_records(current_rows, gear_registry, activity_to_gear)
     current["gear_registry"] = [
         {"gear_id": gear_id, **gear}
