@@ -332,7 +332,7 @@ def backfill_gear_in_dropbox(dbx: dropbox.Dropbox,
         )
 
     file_pattern = re.compile(
-        r"^(?:garmin_history_\\d{4}(?:-\\d{2})?|garmin_\\d{4}-\\d{2}|garmin_current)\\.json$"
+        r"^(?:garmin_history_\d{4}(?:-\d{2})?|garmin_\d{4}-\d{2}|garmin_current)\.json$"
     )
     paths: list[str] = []
     for folder in (HISTORY_DIR, CURRENT_DIR):
@@ -349,7 +349,7 @@ def backfill_gear_in_dropbox(dbx: dropbox.Dropbox,
 
     # Preflight every candidate before writing anything. A malformed archive
     # must not trigger a fallback export or leave a half-processed backfill.
-    pending: list[tuple[str, dict[str, Any], int, int]] = []
+    pending: list[tuple[str, dict[str, Any], int, int, bool]] = []
     registry_rows = [
         {"gear_id": gear_id, **gear}
         for gear_id, gear in sorted(registry.items())
@@ -365,6 +365,7 @@ def backfill_gear_in_dropbox(dbx: dropbox.Dropbox,
 
         seen: set[str] = set()
         links = 0
+        gear_changed = False
         for row in rows:
             if not isinstance(row, dict) or not isinstance(row.get("summary"), dict):
                 raise RuntimeError(f"Cannot safely backfill {path}: malformed activity row")
@@ -373,51 +374,31 @@ def backfill_gear_in_dropbox(dbx: dropbox.Dropbox,
                 raise RuntimeError(f"Cannot safely backfill {path}: missing or duplicate activity ID")
             seen.add(aid)
             gear_id = activity_to_gear.get(aid)
-            row["gear"] = (
+            expected_gear = (
                 {"gear_id": gear_id, "gear": registry[gear_id]}
                 if gear_id is not None else None
             )
+            if row.get("gear") != expected_gear:
+                gear_changed = True
+            row["gear"] = expected_gear
             if gear_id is not None:
                 links += 1
 
         changed = (
-            payload.get("gear_registry") != registry_rows
+            gear_changed
+            or payload.get("gear_registry") != registry_rows
             or metadata.get("gear_link_count") != links
-            or any(
-                row.get("gear") != (
-                    {"gear_id": activity_to_gear[activity_id(row["summary"])],
-                     "gear": registry[activity_to_gear[activity_id(row["summary"])] ]}
-                    if activity_id(row["summary"]) in activity_to_gear else None
-                )
-                for row in rows
-            )
         )
-        # Gear fields above have already been normalized. Compare against the
-        # original downloaded payload via a second read only if needed is wasteful;
-        # instead the original values are captured before mutation below.
-        pending.append((path, payload, links, len(rows)))
+        if changed:
+            payload["gear_registry"] = registry_rows
+            metadata["gear_link_count"] = links
+        pending.append((path, payload, links, len(rows), changed))
 
     updated = 0
     total_activities = 0
     total_links = 0
-    for path, payload, links, activity_count in pending:
-        metadata = payload["metadata"]
-        # Always write only if the stored gear metadata differs. The activity
-        # payload is otherwise retained byte-for-byte at the JSON value level.
-        if (payload.get("gear_registry") != registry_rows
-                or metadata.get("gear_link_count") != links
-                or any(
-                    row.get("gear") != (
-                        {"gear_id": activity_to_gear[activity_id(row["summary"])],
-                         "gear": registry[activity_to_gear[activity_id(row["summary"])] ]}
-                        if activity_id(row["summary"]) in activity_to_gear else None
-                    )
-                    for row in payload["activities"]
-                )):
-            # This comparison is intentionally followed by an unconditional
-            # update of the allowed gear fields; upload_json preserves all others.
-            payload["gear_registry"] = registry_rows
-            metadata["gear_link_count"] = links
+    for path, payload, links, activity_count, changed in pending:
+        if changed:
             upload_json(dbx, path, payload)
             updated += 1
         total_activities += activity_count
@@ -426,7 +407,6 @@ def backfill_gear_in_dropbox(dbx: dropbox.Dropbox,
     LOG.info("Gear-only backfill: %d files updated, %d activities checked, %d links",
              updated, total_activities, total_links)
     return updated, total_activities, total_links
-
 
 
 def as_list(value: Any) -> list[Any]:
