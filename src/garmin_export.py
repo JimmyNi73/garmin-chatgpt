@@ -17,6 +17,9 @@ from zoneinfo import ZoneInfo
 
 import dropbox
 from dropbox.files import WriteMode
+from garmin_personal_api.api_keys import resolve_api_key
+from garmin_personal_api.auth import PersonalApiAuthenticator
+from garmin_personal_api.client import GarminPersonalApiClient
 
 LOG = logging.getLogger("garmin_export")
 TZ = ZoneInfo("Europe/Stockholm")
@@ -43,16 +46,67 @@ DEVICE_MODEL_OVERRIDES = {
     "3503792255": {"device_model": "Garmin epix Pro (Gen 2), 47 mm Sapphire"},
 }
 
-GEAR_REGISTRY = {
-    26714063: {"name": "ASICS GEL-Kayano", "type": "Shoes", "first_use": "2020-05-31", "retired": "2024-04-30"},
-    33143783: {"name": "Adidas Ultraboost 22", "type": "Shoes", "first_use": "2023-04-06", "retired": "2026-03-27"},
-    38487146: {"name": "Saucony Triumph", "type": "Shoes", "first_use": "2024-05-26", "retired": "2026-03-27"},
-    44746572: {"name": "Adidas Ultraboost 5X", "type": "Shoes", "first_use": "2025-07-24", "retired": None},
-    50819595: {"name": "Brooks Glycerin 23", "type": "Shoes", "first_use": "2026-07-09", "retired": None},
-    32340184: {"name": "Asics Gel Trabuco 10 GTX", "type": "Shoes", "first_use": "2022-12-31", "retired": None},
-    36092075: {"name": "Adidas Supernova 2", "type": "Shoes", "first_use": "2023-12-07", "retired": "2026-03-27"},
-    37813831: {"name": "Adidas Ultraboost 22", "type": "Shoes", "first_use": "2024-04-11", "retired": None},
-}
+
+GEAR_REGISTRY: dict[int, dict[str, Any]] = {}
+
+
+def fetch_gear_data(cli: GarminCLI) -> tuple[dict[int, dict[str, Any]], dict[str, int]]:
+    """Fetch Garmin gear and gear-to-activity links through read-only Personal API endpoints."""
+    profile_ok, profile = optional(cli, [], "profile-settings for gear", "profile-settings")
+    if not profile_ok or not isinstance(profile, dict):
+        raise RuntimeError("Cannot retrieve profile settings required for gear export")
+    profile_id = profile.get("userProfilePk") or profile.get("userProfileId")
+    if profile_id is None:
+        for value in profile.values():
+            if isinstance(value, dict):
+                profile_id = value.get("userProfilePk") or value.get("userProfileId")
+                if profile_id is not None:
+                    break
+    if profile_id is None:
+        raise RuntimeError("Garmin profile response did not contain userProfilePk")
+
+    api_key = resolve_api_key()
+    with PersonalApiAuthenticator() as auth:
+        token = auth.obtain_token(api_key)
+        with GarminPersonalApiClient(token.access_token) as client:
+            gear_rows = client.get(
+                "/gear-service/gear/filterGear",
+                params={"userProfilePk": str(profile_id)},
+            )
+            if not isinstance(gear_rows, list):
+                raise RuntimeError("Garmin gear endpoint returned an unexpected response")
+            registry: dict[int, dict[str, Any]] = {}
+            activity_to_gear: dict[str, int] = {}
+            for item in gear_rows:
+                if not isinstance(item, dict) or item.get("gearPk") is None:
+                    continue
+                gear_id = int(item["gearPk"])
+                registry[gear_id] = item
+                gear_uuid = item.get("uuid")
+                if not gear_uuid:
+                    continue
+                linked = client.get(f"/activitylist-service/activities/{gear_uuid}/gear")
+                if isinstance(linked, list):
+                    for link in linked:
+                        if isinstance(link, dict) and link.get("activityId") is not None:
+                            activity_to_gear[str(link["activityId"])] = gear_id
+    LOG.info("Fetched %d gear items and %d activity-to-gear links",
+             len(registry), len(activity_to_gear))
+    return registry, activity_to_gear
+
+
+def enrich_gear_records(rows: list[dict[str, Any]],
+                        registry: dict[int, dict[str, Any]],
+                        activity_to_gear: dict[str, int]) -> None:
+    for row in rows:
+        summary = row.get("summary", {})
+        aid = activity_id(summary) if isinstance(summary, dict) else None
+        gear_id = activity_to_gear.get(aid) if aid else None
+        row["gear"] = (
+            {"gear_id": gear_id, "gear": registry.get(gear_id)}
+            if gear_id is not None else None
+        )
+
 
 
 def enrich_device_ids(value: Any) -> Any:
@@ -354,9 +408,6 @@ def activity_records(cli: GarminCLI, summaries: list[dict[str, Any]]) -> list[di
                 device = device_info_for_activity(record)
                 if device:
                     record["device"] = device
-                gear = gear_for_activity(record)
-                if gear:
-                    record["gear"] = gear
                 records.append(record)
                 break
             except Exception as exc:
@@ -709,6 +760,12 @@ def main() -> None:
         raise RuntimeError("CURRENT: activity detail export incomplete; refusing upload")
 
     current = build_current(cli, today, None, current_rows)
+    gear_registry, activity_to_gear = fetch_gear_data(cli)
+    enrich_gear_records(current_rows, gear_registry, activity_to_gear)
+    current["gear_registry"] = [
+        {"gear_id": gear_id, **gear}
+        for gear_id, gear in gear_registry.items()
+    ]
     uploaded_months: list[str] = []
     for month, month_rows in group_by_month(current_rows).items():
         month_start, month_end = month_bounds(month)
