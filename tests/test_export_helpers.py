@@ -2,6 +2,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 
 sys.path.insert(0, "src")
@@ -83,15 +84,16 @@ class ExportHelperTests(unittest.TestCase):
 
         dbx = FakeDropbox()
         original_output = ge.OUTPUT_DIR
-        ge.OUTPUT_DIR = Path("test-export-output")
-        try:
-            updated, activities, links = ge.backfill_gear_in_dropbox(
-                dbx,
-                {7: {"customMakeModel": "Brooks"}},
-                {"123": 7},
-            )
-        finally:
-            ge.OUTPUT_DIR = original_output
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ge.OUTPUT_DIR = Path(tmpdir)
+            try:
+                updated, activities, links = ge.backfill_gear_in_dropbox(
+                    dbx,
+                    {7: {"customMakeModel": "Brooks"}},
+                    {"123": 7},
+                )
+            finally:
+                ge.OUTPUT_DIR = original_output
 
         self.assertEqual((updated, activities, links), (2, 2, 1))
         historical = dbx.files["/History/garmin_history_2011-01.json"]
