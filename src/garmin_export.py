@@ -589,7 +589,10 @@ def annual_payload(year: int, rows: list[dict[str, Any]], profile: Any,
         "profile": profile,
         "heart_rate_zones": zones,
         "devices": device_registry(rows),
-        "gear_registry": [{"gear_id": key, **value} for key, value in GEAR_REGISTRY.items()],
+        "gear_registry": [
+            {"gear_id": item["gear"]["gear_id"], **(item["gear"].get("gear") or {})}
+            for item in rows if isinstance(item.get("gear"), dict)
+        ],
         "activities": rows,
     }
 
@@ -738,56 +741,29 @@ def main() -> None:
         if any(x is None for x in ids) or len(ids) != len(set(ids)):
             raise RuntimeError(f"YEAR {year}: Garmin index contains missing or duplicate activity IDs")
 
-        if year >= 2026:
-            by_month: dict[str, list[dict[str, Any]]] = {}
-            for summary in summaries:
-                by_month.setdefault(month_of_activity({"summary": summary}), []).append(summary)
-            for month, month_summaries in sorted(by_month.items()):
-                if verify_monthly_history_file(dbx, month, month_summaries):
-                    continue
-                month_rows = activity_records(cli, month_summaries)
-                enrich_gear_records(month_rows, gear_registry, activity_to_gear)
-                got = [activity_id(x.get("summary", {})) for x in month_rows]
-                expected = [activity_id(x) for x in month_summaries]
-                if len(got) != len(expected) or None in got or len(got) != len(set(got)) or set(got) != set(expected):
-                    raise RuntimeError(f"MONTH {month}: incomplete details; file not published")
-                errors: list[dict[str, str]] = []
-                p_ok, profile = optional(cli, errors, f"profile-settings {month}", "profile-settings")
-                z_ok, zones = optional(cli, errors, f"heart-rate-zones {month}", "heart-rate-zones")
-                health = fetch_month_health(cli, month)
-                save_monthly_history_file(dbx, month, month_rows,
-                                          profile if p_ok else None, zones if z_ok else None,
-                                          health)
-            continue
-
-        if verify_existing_annual_file(dbx, year, summaries):
-            skipped_years.append(year)
-            continue
-        if not summaries:
-            LOG.info("YEAR %d: no activities; no archive file required", year)
-            continue
-
-        LOG.info("YEAR %d: downloading details for %d activities",
-                 year, len(summaries))
-        records = activity_records(cli, summaries)
-        enrich_gear_records(records, gear_registry, activity_to_gear)
-        record_ids = [activity_id(x.get("summary", {})) for x in records]
-        if (len(records) != len(summaries) or None in record_ids
-                or len(record_ids) != len(set(record_ids))
-                or set(record_ids) != set(ids)):
-            raise RuntimeError(f"YEAR {year}: detail export incomplete; annual file not published")
-
-        errors: list[dict[str, str]] = []
-        profile_ok, profile = optional(cli, errors, f"profile-settings {year}", "profile-settings")
-        zones_ok, zones = optional(cli, errors, f"heart-rate-zones {year}", "heart-rate-zones")
-        if not profile_ok or not zones_ok:
-            LOG.warning("YEAR %d: profile/zone metadata partially unavailable; activity data is complete",
-                        year)
-        save_annual_file(dbx, year, records,
-                         profile if profile_ok else None,
-                         zones if zones_ok else None)
+        by_month: dict[str, list[dict[str, Any]]] = {}
+        for summary in summaries:
+            by_month.setdefault(month_of_activity({"summary": summary}), []).append(summary)
+        for month, month_summaries in sorted(by_month.items()):
+            if verify_monthly_history_file(dbx, month, month_summaries):
+                continue
+            LOG.info("MONTH %s: downloading details for %d activities",
+                     month, len(month_summaries))
+            month_rows = activity_records(cli, month_summaries)
+            enrich_gear_records(month_rows, gear_registry, activity_to_gear)
+            got = [activity_id(x.get("summary", {})) for x in month_rows]
+            expected = [activity_id(x) for x in month_summaries]
+            if (len(got) != len(expected) or None in got or
+                    len(got) != len(set(got)) or set(got) != set(expected)):
+                raise RuntimeError(f"MONTH {month}: incomplete details; file not published")
+            errors: list[dict[str, str]] = []
+            p_ok, profile = optional(cli, errors, f"profile-settings {month}", "profile-settings")
+            z_ok, zones = optional(cli, errors, f"heart-rate-zones {month}", "heart-rate-zones")
+            health = fetch_month_health(cli, month)
+            save_monthly_history_file(dbx, month, month_rows,
+                                      profile if p_ok else None, zones if z_ok else None,
+                                      health)
         archived_years.append(year)
-        LOG.info("YEAR %d: published and verified (%d activities)", year, len(records))
 
     # Current year is deliberately separate and contains year-to-date activities.
     LOG.info("CURRENT %d: fetching year-to-date activity index", current_year)
