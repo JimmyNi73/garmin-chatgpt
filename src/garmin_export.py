@@ -35,6 +35,49 @@ RANGE_DAYS = int(os.getenv("GARMIN_RANGE_DAYS", "30"))
 DAILY_DETAIL_DAYS = int(os.getenv("GARMIN_DAILY_DETAIL_DAYS", "14"))
 REQUESTS_BETWEEN_PAUSES = 50
 
+# Confirmed from the user's Garmin export and purchase confirmation.
+# Garmin's device registry omitted this device, so keep this explicit override.
+DEVICE_MODEL_OVERRIDES = {
+    "3359313181": {
+        "device_model": "Garmin fēnix 6 Sapphire",
+        "part_number": "010-02158-11",
+        "model_source": "user_confirmed_purchase",
+    },
+}
+
+
+def device_info_for_activity(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the device identity attached to an activity, when Garmin supplies it."""
+    for section in ("summary", "detail"):
+        value = row.get(section)
+        if not isinstance(value, dict):
+            continue
+        device_id = value.get("deviceId", value.get("device_id"))
+        if device_id is None:
+            continue
+        device_id = str(device_id)
+        override = DEVICE_MODEL_OVERRIDES.get(device_id, {})
+        return {
+            "device_id": device_id,
+            "device_model": override.get("device_model"),
+            "part_number": override.get("part_number"),
+            "model_source": override.get("model_source", "garmin_device_registry"),
+        }
+    return None
+
+
+def device_registry(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build a deduplicated registry from device IDs present in exported activities."""
+    devices: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        info = device_info_for_activity(row)
+        if info:
+            devices[info["device_id"]] = info
+    for device_id, override in DEVICE_MODEL_OVERRIDES.items():
+        if device_id in devices:
+            devices[device_id].update(override)
+    return [devices[key] for key in sorted(devices)]
+
 
 def should_run() -> bool:
     if os.getenv("GITHUB_EVENT_NAME") != "schedule":
@@ -250,8 +293,12 @@ def activity_records(cli: GarminCLI, summaries: list[dict[str, Any]]) -> list[di
         error = None
         for attempt in range(1, 4):
             try:
-                records.append({"summary": summary, "detail": cli.run(f"activity {aid}", "activity", aid),
-                                "workouts": cli.run(f"activity-workouts {aid}", "activity-workouts", aid)})
+                record = {"summary": summary, "detail": cli.run(f"activity {aid}", "activity", aid),
+                          "workouts": cli.run(f"activity-workouts {aid}", "activity-workouts", aid)}
+                device = device_info_for_activity(record)
+                if device:
+                    record["device"] = device
+                records.append(record)
                 break
             except Exception as exc:
                 error = exc
@@ -285,6 +332,7 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
         "heart_rate_zones": None,
         "source_status": {},
         "source_errors": errors,
+        "devices": device_registry(activities),
         "activities": activities,
         "daily": {"range_data": {}, "by_date": {},
                   "single_day_window": {"start_date": daily_start.isoformat(),
@@ -389,6 +437,7 @@ def annual_payload(year: int, rows: list[dict[str, Any]], profile: Any,
         "period": {"start_date": f"{year}-01-01", "end_date": f"{year}-12-31"},
         "profile": profile,
         "heart_rate_zones": zones,
+        "devices": device_registry(rows),
         "activities": rows,
     }
 
@@ -405,7 +454,8 @@ def monthly_payload(month: str, rows: list[dict[str, Any]], profile: Any,
                      "activity_count": len(rows), "export_status": "complete",
                      "source": "Garmin Connect", "month": month},
         "period": {"start_date": start, "end_date": end},
-        "profile": profile, "heart_rate_zones": zones, "activities": rows,
+        "profile": profile, "heart_rate_zones": zones,
+        "devices": device_registry(rows), "activities": rows,
     }
 
 
