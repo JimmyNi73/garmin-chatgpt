@@ -33,9 +33,10 @@ PAGE_SIZE = 100
 REQUEST_PAUSE = float(os.getenv("GARMIN_REQUEST_PAUSE_SECONDS", "1"))
 BATCH_PAUSE = float(os.getenv("GARMIN_BATCH_PAUSE_SECONDS", "20"))
 MAX_RETRIES = int(os.getenv("GARMIN_MAX_RETRIES", "8"))
-CURRENT_ACTIVITY_DAYS = int(os.getenv("GARMIN_CURRENT_ACTIVITY_DAYS", "30"))
-RANGE_DAYS = int(os.getenv("GARMIN_RANGE_DAYS", "30"))
-DAILY_DETAIL_DAYS = int(os.getenv("GARMIN_DAILY_DETAIL_DAYS", "14"))
+# Full-history export: date windows are determined by archive periods, never rolling limits.
+CURRENT_ACTIVITY_DAYS = 0
+RANGE_DAYS = 0
+DAILY_DETAIL_DAYS = 0
 REQUESTS_BETWEEN_PAUSES = 50
 
 # Device IDs confirmed against the user's Garmin export. Unknown IDs remain null.
@@ -419,10 +420,10 @@ def activity_records(cli: GarminCLI, summaries: list[dict[str, Any]]) -> list[di
     return records
 def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | None,
                   activity_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    activity_start = (today - timedelta(days=CURRENT_ACTIVITY_DAYS - 1)
-                      if old_current else date(today.year, 1, 1))
-    range_start = today - timedelta(days=RANGE_DAYS - 1)
-    daily_start = today - timedelta(days=DAILY_DETAIL_DAYS - 1)
+    # Current-year data is exported from January 1 through today, not a 14/30-day window.
+    activity_start = date(today.year, 1, 1)
+    range_start = activity_start
+    daily_start = activity_start
     errors: list[dict[str, str]] = []
     if activity_rows is None:
         summaries = fetch_activities(cli, activity_start.isoformat(), today.isoformat())
@@ -434,9 +435,10 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
         "metadata": {
             "file_role": "rolling_current_data",
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            "activity_window_days": CURRENT_ACTIVITY_DAYS,
-            "range_window_days": RANGE_DAYS,
-            "daily_detail_window_days": DAILY_DETAIL_DAYS,
+            "activity_window_days": None,
+            "range_window_days": None,
+            "daily_detail_window_days": None,
+            "history_scope": "all_available_current_year",
         },
         "period": {"start_date": activity_start.isoformat(), "end_date": today.isoformat()},
         "profile": None,
@@ -469,7 +471,7 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
         current["daily"]["range_data"][field] = (
             enrich_device_ids(date_index(value)) if ok else {"raw": None, "by_date": {}})
         current["source_status"][command] = "ok" if ok else "error"
-    for offset in range(DAILY_DETAIL_DAYS):
+    for offset in range((today - daily_start).days + 1):
         d = (daily_start + timedelta(days=offset)).isoformat()
         current["daily"]["by_date"][d] = {}
         for field, command in (("sleep", "sleep"), ("heart_rate", "heart-rate"),
@@ -521,14 +523,25 @@ def fetch_month_health(cli: GarminCLI, month: str) -> dict[str, Any]:
         data["range_data"][field] = (
             enrich_device_ids(date_index(value)) if ok and value is not None
             else {"raw": None, "by_date": {}})
-    # Fitness Age is a single-date endpoint; retain the month's final available day.
-    age_date = min(date.fromisoformat(end), datetime.now(TZ).date()).isoformat()
-    ok, value = optional(cli, errors, f"fitness-age {age_date}",
-                         "fitness-age", "--date", age_date)
-    data["fitness_age"] = enrich_device_ids(value) if ok else None
+    # Daily endpoints must be queried per date. Fetch every calendar day in the
+    # archive month; an empty response is a normal data gap, not an export failure.
+    data["by_date"] = {}
+    first = date.fromisoformat(start)
+    last = min(date.fromisoformat(end), datetime.now(TZ).date())
+    for offset in range((last - first).days + 1):
+        day = (first + timedelta(days=offset)).isoformat()
+        daily_row: dict[str, Any] = {}
+        for field, command in (("sleep", "sleep"), ("heart_rate", "heart-rate"),
+                               ("hrv", "hrv"), ("spo2", "spo2"),
+                               ("fitness_age", "fitness-age")):
+            ok, value = optional(cli, errors, f"{command} {day}", command, "--date", day)
+            daily_row[field] = enrich_device_ids(value) if ok else None
+        data["by_date"][day] = daily_row
     data["metadata"] = {
         "month": month, "source_error_count": len(errors),
         "export_status": "complete" if not errors else "partial",
+        "daily_detail_dates_queried": len(data["by_date"]),
+        "history_scope": "full_month_all_available_dates",
     }
     return data
 
@@ -632,6 +645,11 @@ def verify_monthly_history_file(dbx: dropbox.Dropbox, month: str,
     if not existing:
         return False
     status = existing.get("metadata", {}).get("export_status")
+    health = existing.get("health", {})
+    health_meta = health.get("metadata", {}) if isinstance(health, dict) else {}
+    if not isinstance(health.get("by_date"), dict) or not health_meta.get("history_scope"):
+        LOG.info("Existing %s lacks full-history daily health; rebuilding month", path)
+        return False
     if status == "partial":
         LOG.info("Existing %s is partial; retrying month", path)
         return False
@@ -663,7 +681,11 @@ def save_monthly_history_file(dbx: dropbox.Dropbox, month: str,
                    if isinstance(x, dict)}
         if old_ids != {activity_id(x.get("summary", {})) for x in rows}:
             raise RuntimeError(f"Existing {path} differs from Garmin; refusing overwrite")
-        if existing.get("metadata", {}).get("export_status") == "complete":
+        old_health = existing.get("health", {})
+        old_health_meta = old_health.get("metadata", {}) if isinstance(old_health, dict) else {}
+        if (existing.get("metadata", {}).get("export_status") == "complete"
+                and isinstance(old_health.get("by_date"), dict)
+                and old_health_meta.get("history_scope")):
             return
         mode = WriteMode.overwrite
     data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
