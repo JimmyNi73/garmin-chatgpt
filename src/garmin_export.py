@@ -43,7 +43,11 @@ REQUESTS_BETWEEN_PAUSES = 50
 DEVICE_MODEL_OVERRIDES = {
     "3819067544": {"device_model": "Garmin Forerunner 305"},
     "3934164543": {"device_model": "Garmin fēnix 3 HR"},
-    "3359313181": {"device_model": "Garmin fēnix 6 Sapphire"},
+    "3359313181": {
+        "device_model": "Garmin fēnix 6 Sapphire",
+        "part_number": "010-02158-11",
+        "model_source": "user_confirmed_purchase",
+    },
     "3503792255": {"device_model": "Garmin epix Pro (Gen 2), 47 mm Sapphire"},
 }
 
@@ -139,17 +143,6 @@ def gear_for_activity(activity: dict[str, Any]) -> dict[str, Any] | None:
                 meta = GEAR_REGISTRY.get(key)
                 return {"gear_id": key, **(meta or {"name": None, "type": None})}
     return None
-
-# Confirmed from the user's Garmin export and purchase confirmation.
-# Garmin's device registry omitted this device, so keep this explicit override.
-DEVICE_MODEL_OVERRIDES = {
-    "3359313181": {
-        "device_model": "Garmin fēnix 6 Sapphire",
-        "part_number": "010-02158-11",
-        "model_source": "user_confirmed_purchase",
-    },
-}
-
 
 def device_info_for_activity(row: dict[str, Any]) -> dict[str, Any] | None:
     """Return the device identity attached to an activity, when Garmin supplies it."""
@@ -491,12 +484,16 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
 
 
 def ensure_dropbox_folders(dbx: dropbox.Dropbox) -> None:
-    """Require the user's existing folders; never create Dropbox folders."""
+    """Ensure the app-folder archive destinations exist."""
     for path in (HISTORY_DIR, CURRENT_DIR):
         try:
             metadata = dbx.files_get_metadata(path)
         except dropbox.exceptions.ApiError as exc:
-            raise RuntimeError(f"Required Dropbox folder is missing: {path}") from exc
+            if exc.error.is_path() and exc.error.get_path().is_not_found():
+                dbx.files_create_folder_v2(path)
+                LOG.info("Created missing Dropbox folder %s", path)
+                continue
+            raise
         if not isinstance(metadata, dropbox.files.FolderMetadata):
             raise RuntimeError(f"Expected a Dropbox folder at {path}")
 
@@ -647,7 +644,7 @@ def verify_monthly_history_file(dbx: dropbox.Dropbox, month: str,
     status = existing.get("metadata", {}).get("export_status")
     health = existing.get("health", {})
     health_meta = health.get("metadata", {}) if isinstance(health, dict) else {}
-    if not isinstance(health.get("by_date"), dict) or not health_meta.get("history_scope"):
+    if not isinstance(health, dict) or not isinstance(health.get("by_date"), dict) or not health_meta.get("history_scope"):
         LOG.info("Existing %s lacks full-history daily health; rebuilding month", path)
         return False
     if status == "partial":
