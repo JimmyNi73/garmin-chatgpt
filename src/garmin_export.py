@@ -590,10 +590,13 @@ def annual_payload(year: int, rows: list[dict[str, Any]], profile: Any,
         "profile": profile,
         "heart_rate_zones": zones,
         "devices": device_registry(rows),
-        "gear_registry": [
-            {"gear_id": item["gear"]["gear_id"], **(item["gear"].get("gear") or {})}
+        "gear_registry": list({
+            item["gear"]["gear_id"]: {
+                "gear_id": item["gear"]["gear_id"],
+                **(item["gear"].get("gear") or {}),
+            }
             for item in rows if isinstance(item.get("gear"), dict)
-        ],
+        }.values()),
         "activities": rows,
     }
 
@@ -608,7 +611,8 @@ def monthly_payload(month: str, rows: list[dict[str, Any]], profile: Any,
     return {
         "schema_version": 1,
         "metadata": {"file_role": file_role, "created_at": datetime.now(timezone.utc).isoformat(),
-                     "activity_count": len(rows), "export_status": "complete",
+                     "activity_count": len(rows),
+                     "export_status": (health or {}).get("metadata", {}).get("export_status", "complete"),
                      "source": "Garmin Connect", "month": month},
         "period": {"start_date": start, "end_date": end},
         "profile": profile, "heart_rate_zones": zones,
@@ -625,8 +629,14 @@ def verify_monthly_history_file(dbx: dropbox.Dropbox, month: str,
     if not dropbox_file_exists(dbx, path):
         return False
     existing = read_dropbox(dbx, path)
-    if not existing or existing.get("metadata", {}).get("export_status") != "complete":
-        raise RuntimeError(f"Existing {path} is not marked complete; refusing overwrite")
+    if not existing:
+        return False
+    status = existing.get("metadata", {}).get("export_status")
+    if status == "partial":
+        LOG.info("Existing %s is partial; retrying month", path)
+        return False
+    if status != "complete":
+        raise RuntimeError(f"Existing {path} has unknown export status; refusing overwrite")
     rows = existing.get("activities")
     if not isinstance(rows, list):
         raise RuntimeError(f"Existing {path} has no valid activities array")
@@ -646,15 +656,18 @@ def save_monthly_history_file(dbx: dropbox.Dropbox, month: str,
     path = f"{HISTORY_DIR}/garmin_history_{month}.json"
     payload = monthly_payload(month, rows, profile, zones,
                               "immutable_activity_history_monthly", health)
+    mode = WriteMode.add
     if dropbox_file_exists(dbx, path):
         existing = read_dropbox(dbx, path) or {}
         old_ids = {activity_id(x.get("summary", {})) for x in existing.get("activities", [])
                    if isinstance(x, dict)}
         if old_ids != {activity_id(x.get("summary", {})) for x in rows}:
             raise RuntimeError(f"Existing {path} differs from Garmin; refusing overwrite")
-        return
+        if existing.get("metadata", {}).get("export_status") == "complete":
+            return
+        mode = WriteMode.overwrite
     data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
-    dbx.files_upload(data, path, mode=WriteMode.add, mute=True)
+    dbx.files_upload(data, path, mode=mode, mute=True)
     LOG.info("Created %s (%d activities, %d bytes)", path, len(rows), len(data))
 
 
