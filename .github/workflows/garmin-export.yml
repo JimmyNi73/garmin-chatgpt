@@ -47,5 +47,5 @@ jobs:
           GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
           GARMIN_BATCH_PAUSE_SECONDS: "5"
           GARMIN_MAX_RETRIES: "8"
-          GARMIN_GEAR_BACKFILL_ONLY: ${{ github.event_name == 'issues' && github.event.issue.title == 'Starta Garmin-export' && 'true' || 'false' }}
+          GARMIN_GEAR_BACKFILL_ONLY: "false"
         run: python src/garmin_export.py
