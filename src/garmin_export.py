@@ -365,7 +365,7 @@ def optional_range(cli: GarminCLI, errors: list[dict[str, str]],
         return True, cli.run(label, *args)
     except Exception as exc:
         message = str(exc)
-        if re.search(r"HTTP\\s*400", message, re.I):
+        if re.search(r"HTTP\s*400", message, re.I):
             # Garmin returns HTTP 400 with an empty body for these daily-stat
             # endpoints when the requested historical period has no records
             # (for example, step/stress history predating compatible devices).
@@ -373,7 +373,7 @@ def optional_range(cli: GarminCLI, errors: list[dict[str, str]],
             LOG.warning("%s unavailable for requested period: Garmin returned HTTP 400", label)
             unavailable.append({"source": label, "reason": "Garmin HTTP 400; no records returned"})
             return True, None
-        if re.search(r"\\b404\\b|no data available|no data for (?:this )?(?:date|period)", message, re.I):
+        if re.search(r"\b404\b|no data available|no data for (?:this )?(?:date|period)", message, re.I):
             LOG.info("%s: no data available", label)
             return True, None
         LOG.error("%s failed: %s", label, exc)
