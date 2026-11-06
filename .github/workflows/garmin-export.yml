@@ -2,6 +2,8 @@ name: Garmin Data Export
 
 on:
   workflow_dispatch:
+  issues:
+    types: [opened]
   schedule:
     # Paired UTC slots plus the Europe/Stockholm guard handle CET and CEST.
     - cron: "0 4,5,6,7,12,13,14,15,18,19 * * *"
@@ -15,6 +17,7 @@ concurrency:
 
 jobs:
   export:
+    if: github.event_name != 'issues' || github.event.issue.title == 'Starta Garmin-export'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -41,4 +44,5 @@ jobs:
           GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
           GARMIN_BATCH_PAUSE_SECONDS: "5"
           GARMIN_MAX_RETRIES: "8"
+          GARMIN_GEAR_BACKFILL_ONLY: ${{ github.event_name == 'issues' && github.event.issue.title == 'Starta Garmin-export' && 'true' || 'false' }}
         run: python src/garmin_export.py
