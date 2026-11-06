@@ -35,6 +35,9 @@ jobs:
       - name: Validate Python syntax
         run: python -m py_compile src/garmin_export.py
 
+      - name: Run exporter unit tests
+        run: python -m unittest discover -s tests -v
+
       - name: Export Garmin data
         env:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
