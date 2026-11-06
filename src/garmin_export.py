@@ -300,7 +300,7 @@ def optional(cli: GarminCLI, errors: list[dict[str, str]],
         message = str(exc)
         # Garmin may return 404 when a date has no recorded value. Treat that
         # as an ordinary gap; genuine transport/auth/API failures remain errors.
-        if re.search(r"HTTP\\s*404|status(?:_code)?[=: ]+404|not found|no data", message, re.I):
+        if re.search(r"HTTP\s*404|status(?:_code)?[=: ]+404|not found|no data", message, re.I):
             LOG.info("%s: no data available", label)
             return True, None
         LOG.error("%s failed: %s", label, exc)
@@ -391,7 +391,8 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
         "heart_rate_zones": None,
         "source_status": {},
         "source_errors": errors,
-        "devices": device_registry(activities),\n        "gear_registry": [{"gear_id": key, **value} for key, value in GEAR_REGISTRY.items()],
+        "devices": device_registry(activities),
+        "gear_registry": [{"gear_id": key, **value} for key, value in GEAR_REGISTRY.items()],
         "activities": activities,
         "daily": {"range_data": {}, "by_date": {},
                   "single_day_window": {"start_date": daily_start.isoformat(),
@@ -502,7 +503,8 @@ def annual_payload(year: int, rows: list[dict[str, Any]], profile: Any,
         "period": {"start_date": f"{year}-01-01", "end_date": f"{year}-12-31"},
         "profile": profile,
         "heart_rate_zones": zones,
-        "devices": device_registry(rows),\n        "gear_registry": [{"gear_id": key, **value} for key, value in GEAR_REGISTRY.items()],
+        "devices": device_registry(rows),
+        "gear_registry": [{"gear_id": key, **value} for key, value in GEAR_REGISTRY.items()],
         "activities": rows,
     }
 
