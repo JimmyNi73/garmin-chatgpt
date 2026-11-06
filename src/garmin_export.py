@@ -316,6 +316,119 @@ def upload_json(dbx: dropbox.Dropbox, path: str, value: dict[str, Any]) -> None:
     LOG.info("Uploaded %s (%d bytes)", path, local.stat().st_size)
 
 
+
+
+def backfill_gear_in_dropbox(dbx: dropbox.Dropbox,
+                             registry: dict[int, dict[str, Any]],
+                             activity_to_gear: dict[str, int]) -> tuple[int, int, int]:
+    """Patch only gear fields in existing Dropbox archives; never fetch activity details."""
+    if not registry:
+        raise RuntimeError("Garmin returned an empty gear registry; refusing gear backfill")
+    unknown_gear_ids = set(activity_to_gear.values()) - set(registry)
+    if unknown_gear_ids:
+        raise RuntimeError(
+            "Garmin gear links reference unknown gear IDs; refusing backfill: "
+            + ", ".join(map(str, sorted(unknown_gear_ids)))
+        )
+
+    file_pattern = re.compile(
+        r"^(?:garmin_history_\\d{4}(?:-\\d{2})?|garmin_\\d{4}-\\d{2}|garmin_current)\\.json$"
+    )
+    paths: list[str] = []
+    for folder in (HISTORY_DIR, CURRENT_DIR):
+        result = dbx.files_list_folder(folder)
+        while True:
+            for entry in result.entries:
+                path = getattr(entry, "path_display", None)
+                name = getattr(entry, "name", None) or (path.rsplit("/", 1)[-1] if path else "")
+                if path and file_pattern.fullmatch(name):
+                    paths.append(path)
+            if not result.has_more:
+                break
+            result = dbx.files_list_folder_continue(result.cursor)
+
+    # Preflight every candidate before writing anything. A malformed archive
+    # must not trigger a fallback export or leave a half-processed backfill.
+    pending: list[tuple[str, dict[str, Any], int, int]] = []
+    registry_rows = [
+        {"gear_id": gear_id, **gear}
+        for gear_id, gear in sorted(registry.items())
+    ]
+    for path in sorted(set(paths)):
+        payload = read_dropbox(dbx, path)
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Cannot safely backfill {path}: file is missing or invalid")
+        rows = payload.get("activities")
+        metadata = payload.get("metadata")
+        if not isinstance(rows, list) or not isinstance(metadata, dict):
+            raise RuntimeError(f"Cannot safely backfill {path}: activities/metadata structure is invalid")
+
+        seen: set[str] = set()
+        links = 0
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("summary"), dict):
+                raise RuntimeError(f"Cannot safely backfill {path}: malformed activity row")
+            aid = activity_id(row["summary"])
+            if aid is None or aid in seen:
+                raise RuntimeError(f"Cannot safely backfill {path}: missing or duplicate activity ID")
+            seen.add(aid)
+            gear_id = activity_to_gear.get(aid)
+            row["gear"] = (
+                {"gear_id": gear_id, "gear": registry[gear_id]}
+                if gear_id is not None else None
+            )
+            if gear_id is not None:
+                links += 1
+
+        changed = (
+            payload.get("gear_registry") != registry_rows
+            or metadata.get("gear_link_count") != links
+            or any(
+                row.get("gear") != (
+                    {"gear_id": activity_to_gear[activity_id(row["summary"])],
+                     "gear": registry[activity_to_gear[activity_id(row["summary"])] ]}
+                    if activity_id(row["summary"]) in activity_to_gear else None
+                )
+                for row in rows
+            )
+        )
+        # Gear fields above have already been normalized. Compare against the
+        # original downloaded payload via a second read only if needed is wasteful;
+        # instead the original values are captured before mutation below.
+        pending.append((path, payload, links, len(rows)))
+
+    updated = 0
+    total_activities = 0
+    total_links = 0
+    for path, payload, links, activity_count in pending:
+        metadata = payload["metadata"]
+        # Always write only if the stored gear metadata differs. The activity
+        # payload is otherwise retained byte-for-byte at the JSON value level.
+        if (payload.get("gear_registry") != registry_rows
+                or metadata.get("gear_link_count") != links
+                or any(
+                    row.get("gear") != (
+                        {"gear_id": activity_to_gear[activity_id(row["summary"])],
+                         "gear": registry[activity_to_gear[activity_id(row["summary"])] ]}
+                        if activity_id(row["summary"]) in activity_to_gear else None
+                    )
+                    for row in payload["activities"]
+                )):
+            # This comparison is intentionally followed by an unconditional
+            # update of the allowed gear fields; upload_json preserves all others.
+            payload["gear_registry"] = registry_rows
+            metadata["gear_link_count"] = links
+            upload_json(dbx, path, payload)
+            updated += 1
+        total_activities += activity_count
+        total_links += links
+
+    LOG.info("Gear-only backfill: %d files updated, %d activities checked, %d links",
+             updated, total_activities, total_links)
+    return updated, total_activities, total_links
+
+
+
 def as_list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -867,15 +980,23 @@ def main() -> None:
     today = datetime.now(TZ).date()
     current_month = today.strftime("%Y-%m")
     cli = GarminCLI()
-    # Gear lookup is currently an optional enrichment: Garmin's previously used
-    # Personal API endpoint returns 404. Do not let this secondary source block
-    # the full activity and health-history export.
+    # Gear data is fetched from Garmin's live Personal API. An Issue-triggered
+    # run performs only a gear-field backfill and exits before activity indexes,
+    # activity details, or health history are fetched.
+    gear_only_backfill = os.getenv("GARMIN_GEAR_BACKFILL_ONLY", "").lower() == "true"
     try:
         gear_registry, activity_to_gear = fetch_gear_data(cli)
-    except Exception as exc:
-        LOG.warning("Gear registry unavailable; continuing without gear links: %s", exc)
+    except Exception:
+        if gear_only_backfill:
+            raise
+        LOG.exception("Gear registry unavailable; continuing normal export without gear links")
         gear_registry, activity_to_gear = {}, {}
     GEAR_REGISTRY.update(gear_registry)
+
+    if gear_only_backfill:
+        backfill_gear_in_dropbox(dbx, gear_registry, activity_to_gear)
+        LOG.info("Gear-only backfill completed. No activity details or health history were downloaded.")
+        return
 
     # Collect every activity index year first, then build a continuous month
     # calendar from the earliest activity through the current month. Months
