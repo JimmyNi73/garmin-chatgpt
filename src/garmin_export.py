@@ -357,6 +357,30 @@ def optional(cli: GarminCLI, errors: list[dict[str, str]],
         return False, None
 
 
+def optional_range(cli: GarminCLI, errors: list[dict[str, str]],
+                  unavailable: list[dict[str, str]], label: str, *args: str
+                  ) -> tuple[bool, Any]:
+    """Fetch a documented date-range source; record Garmin 400 empty-history responses."""
+    try:
+        return True, cli.run(label, *args)
+    except Exception as exc:
+        message = str(exc)
+        if re.search(r"HTTP\\s*400", message, re.I):
+            # Garmin returns HTTP 400 with an empty body for these daily-stat
+            # endpoints when the requested historical period has no records
+            # (for example, step/stress history predating compatible devices).
+            # Keep this distinct from measured zero and preserve the reason.
+            LOG.warning("%s unavailable for requested period: Garmin returned HTTP 400", label)
+            unavailable.append({"source": label, "reason": "Garmin HTTP 400; no records returned"})
+            return True, None
+        if re.search(r"\\b404\\b|no data available|no data for (?:this )?(?:date|period)", message, re.I):
+            LOG.info("%s: no data available", label)
+            return True, None
+        LOG.error("%s failed: %s", label, exc)
+        errors.append({"source": label, "error": message})
+        return False, None
+
+
 def merge_current(old: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, Any]:
     if not old:
         return new
@@ -503,7 +527,9 @@ def fetch_month_health(cli: GarminCLI, month: str) -> dict[str, Any]:
     """Fetch all supported date-range health sources for one historical month."""
     start, end = month_bounds(month)
     errors: list[dict[str, str]] = []
-    data: dict[str, Any] = {"range_data": {}, "source_errors": errors}
+    unavailable: list[dict[str, str]] = []
+    data: dict[str, Any] = {"range_data": {}, "source_errors": errors,
+                            "unavailable_sources": unavailable}
     sources = {
         "stress": "stress",
         "steps": "steps",
@@ -516,11 +542,17 @@ def fetch_month_health(cli: GarminCLI, month: str) -> dict[str, Any]:
         "wellness_activity_summaries": "wellness-activity-summaries",
     }
     for field, command in sources.items():
-        ok, value = optional(cli, errors, f"{command} {month}", command,
-                             "--start-date", start, "--end-date", end)
+        label = f"{command} {month}"
+        args = (command, "--start-date", start, "--end-date", end)
+        if field in ("stress", "steps"):
+            ok, value = optional_range(cli, errors, unavailable, label, *args)
+        else:
+            ok, value = optional(cli, errors, label, *args)
         data["range_data"][field] = (
             enrich_device_ids(date_index(value)) if ok and value is not None
-            else {"raw": None, "by_date": {}})
+            else {"raw": None, "by_date": {},
+                  "availability": "unavailable" if any(
+                      item["source"] == label for item in unavailable) else "no_data"})
     # Daily endpoints must be queried per date. Fetch every calendar day in the
     # archive month; an empty response is a normal data gap, not an export failure.
     data["by_date"] = {}
@@ -537,6 +569,7 @@ def fetch_month_health(cli: GarminCLI, month: str) -> dict[str, Any]:
         data["by_date"][day] = daily_row
     data["metadata"] = {
         "month": month, "source_error_count": len(errors),
+        "unavailable_source_count": len(unavailable),
         "export_status": "complete" if not errors else "partial",
         "daily_detail_dates_queried": len(data["by_date"]),
         "history_scope": "full_month_all_available_dates",
