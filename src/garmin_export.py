@@ -35,6 +35,55 @@ RANGE_DAYS = int(os.getenv("GARMIN_RANGE_DAYS", "30"))
 DAILY_DETAIL_DAYS = int(os.getenv("GARMIN_DAILY_DETAIL_DAYS", "14"))
 REQUESTS_BETWEEN_PAUSES = 50
 
+# Device IDs confirmed against the user's Garmin export. Unknown IDs remain null.
+DEVICE_MODEL_OVERRIDES = {
+    "3819067544": {"device_model": "Garmin Forerunner 305"},
+    "3934164543": {"device_model": "Garmin fēnix 3 HR"},
+    "3359313181": {"device_model": "Garmin fēnix 6 Sapphire"},
+    "3503792255": {"device_model": "Garmin epix Pro (Gen 2), 47 mm Sapphire"},
+}
+
+GEAR_REGISTRY = {
+    26714063: {"name": "ASICS GEL-Kayano", "type": "Shoes", "first_use": "2020-05-31", "retired": "2024-04-30"},
+    33143783: {"name": "Adidas Ultraboost 22", "type": "Shoes", "first_use": "2023-04-06", "retired": "2026-03-27"},
+    38487146: {"name": "Saucony Triumph", "type": "Shoes", "first_use": "2024-05-26", "retired": "2026-03-27"},
+    44746572: {"name": "Adidas Ultraboost 5X", "type": "Shoes", "first_use": "2025-07-24", "retired": None},
+    50819595: {"name": "Brooks Glycerin 23", "type": "Shoes", "first_use": "2026-07-09", "retired": None},
+    32340184: {"name": "Asics Gel Trabuco 10 GTX", "type": "Shoes", "first_use": "2022-12-31", "retired": None},
+    36092075: {"name": "Adidas Supernova 2", "type": "Shoes", "first_use": "2023-12-07", "retired": "2026-03-27"},
+    37813831: {"name": "Adidas Ultraboost 22", "type": "Shoes", "first_use": "2024-04-11", "retired": None},
+}
+
+
+def enrich_device_ids(value: Any) -> Any:
+    """Add a resolved device model wherever a Garmin payload includes deviceId."""
+    if isinstance(value, list):
+        return [enrich_device_ids(item) for item in value]
+    if isinstance(value, dict):
+        result = {key: enrich_device_ids(item) for key, item in value.items()}
+        device_id = result.get("deviceId", result.get("device_id"))
+        if device_id is not None:
+            device_id = str(device_id)
+            result["device_id"] = device_id
+            result["device_model"] = DEVICE_MODEL_OVERRIDES.get(device_id, {}).get("device_model")
+        return result
+    return value
+
+
+def gear_for_activity(activity: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve gear when the activity payload contains a Garmin gear primary key."""
+    for source in (activity.get("detail"), activity.get("summary"), activity):
+        if isinstance(source, dict):
+            gear_id = source.get("gearPk", source.get("gearId", source.get("gear_id")))
+            if gear_id is not None:
+                try:
+                    key = int(gear_id)
+                except (TypeError, ValueError):
+                    continue
+                meta = GEAR_REGISTRY.get(key)
+                return {"gear_id": key, **(meta or {"name": None, "type": None})}
+    return None
+
 # Confirmed from the user's Garmin export and purchase confirmation.
 # Garmin's device registry omitted this device, so keep this explicit override.
 DEVICE_MODEL_OVERRIDES = {
@@ -295,9 +344,13 @@ def activity_records(cli: GarminCLI, summaries: list[dict[str, Any]]) -> list[di
             try:
                 record = {"summary": summary, "detail": cli.run(f"activity {aid}", "activity", aid),
                           "workouts": cli.run(f"activity-workouts {aid}", "activity-workouts", aid)}
+                record = enrich_device_ids(record)
                 device = device_info_for_activity(record)
                 if device:
                     record["device"] = device
+                gear = gear_for_activity(record)
+                if gear:
+                    record["gear"] = gear
                 records.append(record)
                 break
             except Exception as exc:
@@ -332,7 +385,7 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
         "heart_rate_zones": None,
         "source_status": {},
         "source_errors": errors,
-        "devices": device_registry(activities),
+        "devices": device_registry(activities),\n        "gear_registry": [{"gear_id": key, **value} for key, value in GEAR_REGISTRY.items()],
         "activities": activities,
         "daily": {"range_data": {}, "by_date": {},
                   "single_day_window": {"start_date": daily_start.isoformat(),
@@ -344,7 +397,10 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
         current[field] = value
         current["source_status"][command] = "ok" if ok else "error"
     for field, command in {
-        "stress": "stress", "sleep_summaries": "sleep-summaries",
+        "stress": "stress", "steps": "steps",
+        "weight_measurements": "weight-measurements",
+        "weight_goals": "effective-weight-goals",
+        "sleep_summaries": "sleep-summaries",
         "body_battery": "body-battery", "daily_summaries": "daily-summaries",
         "hrv_summaries": "hrv-summaries",
         "wellness_activity_summaries": "wellness-activity-summaries",
@@ -352,17 +408,20 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
         ok, value = optional(cli, errors, command, command, "--start-date",
                              range_start.isoformat(), "--end-date", today.isoformat())
         current["daily"]["range_data"][field] = (
-            date_index(value) if ok else {"raw": None, "by_date": {}})
+            enrich_device_ids(date_index(value)) if ok else {"raw": None, "by_date": {}})
         current["source_status"][command] = "ok" if ok else "error"
     for offset in range(DAILY_DETAIL_DAYS):
         d = (daily_start + timedelta(days=offset)).isoformat()
         current["daily"]["by_date"][d] = {}
-        for field, command in (("heart_rate", "heart-rate"), ("hrv", "hrv"),
-                               ("spo2", "spo2")):
+        for field, command in (("sleep", "sleep"), ("heart_rate", "heart-rate"),
+                               ("hrv", "hrv"), ("spo2", "spo2"),
+                               ("fitness_age", "fitness-age")):
             ok, value = optional(cli, errors, f"{command} {d}", command, "--date", d)
-            current["daily"]["by_date"][d][field] = (
-                value if ok else {"error": "source request failed"})
-            current["source_status"][f"{command} {d}"] = "ok" if ok else "error"
+            # A successful empty response is a normal data gap, not an error.
+            current["daily"]["by_date"][d][field] = enrich_device_ids(value) if ok else None
+            current["source_status"][f"{command} {d}"] = (
+                "ok" if ok and value is not None else
+                "no_data" if ok else "error")
     current["metadata"]["garmin_api_requests"] = cli.request_count
     current["metadata"]["activity_count"] = len(activities)
     current["metadata"]["source_error_count"] = len(errors)
@@ -437,7 +496,7 @@ def annual_payload(year: int, rows: list[dict[str, Any]], profile: Any,
         "period": {"start_date": f"{year}-01-01", "end_date": f"{year}-12-31"},
         "profile": profile,
         "heart_rate_zones": zones,
-        "devices": device_registry(rows),
+        "devices": device_registry(rows),\n        "gear_registry": [{"gear_id": key, **value} for key, value in GEAR_REGISTRY.items()],
         "activities": rows,
     }
 
