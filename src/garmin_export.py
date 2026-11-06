@@ -297,8 +297,14 @@ def optional(cli: GarminCLI, errors: list[dict[str, str]],
     try:
         return True, cli.run(label, *args)
     except Exception as exc:
+        message = str(exc)
+        # Garmin may return 404 when a date has no recorded value. Treat that
+        # as an ordinary gap; genuine transport/auth/API failures remain errors.
+        if re.search(r"HTTP\\s*404|status(?:_code)?[=: ]+404|not found|no data", message, re.I):
+            LOG.info("%s: no data available", label)
+            return True, None
         LOG.error("%s failed: %s", label, exc)
-        errors.append({"source": label, "error": str(exc)})
+        errors.append({"source": label, "error": message})
         return False, None
 
 
