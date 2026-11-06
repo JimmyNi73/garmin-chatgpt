@@ -765,7 +765,15 @@ def main() -> None:
     today = datetime.now(TZ).date()
     current_month = today.strftime("%Y-%m")
     cli = GarminCLI()
-    gear_registry, activity_to_gear = fetch_gear_data(cli)
+    # Gear lookup is currently an optional enrichment: Garmin's previously used
+    # Personal API endpoint returns 404. Do not let this secondary source block
+    # the full activity and health-history export.
+    try:
+        gear_registry, activity_to_gear = fetch_gear_data(cli)
+    except Exception as exc:
+        LOG.warning("Gear registry unavailable; continuing without gear links: %s", exc)
+        gear_registry, activity_to_gear = {}, {}
+    GEAR_REGISTRY.update(gear_registry)
 
     # Collect every activity index year first, then build a continuous month
     # calendar from the earliest activity through the current month. Months
