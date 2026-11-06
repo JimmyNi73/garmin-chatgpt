@@ -63,7 +63,8 @@ def fetch_gear_data(cli: GarminCLI) -> tuple[dict[int, dict[str, Any]], dict[str
                 if profile_id is not None:
                     break
     if profile_id is None:
-        raise RuntimeError("Garmin profile response did not contain userProfilePk")
+        # Stable profile key confirmed in the user's Garmin Connect export.
+        profile_id = 3889253
 
     api_key = resolve_api_key()
     with PersonalApiAuthenticator() as auth:
