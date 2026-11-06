@@ -110,6 +110,7 @@ def fetch_gear_data(cli: GarminCLI) -> tuple[dict[int, dict[str, Any]], dict[str
             # gearActivityDTOs is keyed by gearPk and contains activityId rows.
             # Do not call the old UUID-based endpoint: it returned 404 and is
             # unnecessary when Garmin supplies the complete mapping here.
+            ambiguous_activity_ids: set[str] = set()
             for gear_key, links in gear_activity_rows.items():
                 if not isinstance(links, list):
                     continue
@@ -125,9 +126,20 @@ def fetch_gear_data(cli: GarminCLI) -> tuple[dict[int, dict[str, Any]], dict[str
                         link_gear_id = int(link_gear_id)
                     except (TypeError, ValueError):
                         continue
-                    activity_to_gear[str(link["activityId"])] = link_gear_id
-    LOG.info("Fetched %d gear items and %d activity-to-gear links",
-             len(registry), len(activity_to_gear))
+                    aid = str(link["activityId"])
+                    previous = activity_to_gear.get(aid)
+                    if previous is not None and previous != link_gear_id:
+                        ambiguous_activity_ids.add(aid)
+                    else:
+                        activity_to_gear[aid] = link_gear_id
+
+            # A handful of Garmin exports contain conflicting assignments.
+            # Leave those activities unmapped rather than attributing the wrong shoe.
+            for aid in ambiguous_activity_ids:
+                activity_to_gear.pop(aid, None)
+    LOG.info("Fetched %d gear items and %d unambiguous activity-to-gear links "
+             "(%d ambiguous assignments skipped)",
+             len(registry), len(activity_to_gear), len(ambiguous_activity_ids))
     return registry, activity_to_gear
 
 
