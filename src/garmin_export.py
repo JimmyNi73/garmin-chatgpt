@@ -731,7 +731,8 @@ def verify_monthly_history_file(dbx: dropbox.Dropbox, month: str,
 def save_monthly_history_file(dbx: dropbox.Dropbox, month: str,
                               rows: list[dict[str, Any]], profile: Any, zones: Any,
                               health: dict[str, Any] | None = None,
-                              gear_registry: dict[int, dict[str, Any]] | None = None) -> None:
+                              gear_registry: dict[int, dict[str, Any]] | None = None,
+                              force_refresh: bool = False) -> None:
     path = f"{HISTORY_DIR}/garmin_history_{month}.json"
     payload = monthly_payload(month, rows, profile, zones,
                               "immutable_activity_history_monthly", health, gear_registry)
@@ -744,7 +745,8 @@ def save_monthly_history_file(dbx: dropbox.Dropbox, month: str,
             raise RuntimeError(f"Existing {path} differs from Garmin; refusing overwrite")
         old_health = existing.get("health", {})
         old_health_meta = old_health.get("metadata", {}) if isinstance(old_health, dict) else {}
-        if (existing.get("metadata", {}).get("export_status") == "complete"
+        if (not force_refresh
+                and existing.get("metadata", {}).get("export_status") == "complete"
                 and isinstance(old_health, dict)
                 and isinstance(old_health.get("by_date"), dict)
                 and old_health_meta.get("history_scope") == "full_month_all_available_dates"):
@@ -862,19 +864,90 @@ def main() -> None:
 
     completed: list[str] = []
     rebuilt: list[str] = []
+    # Refresh activity details for exactly the latest 30 calendar days,
+    # independent of the current day of the month.
+    refresh_start = today - timedelta(days=29)
     for month in months:
         month_summaries = summaries_by_month.get(month, [])
         is_current = month == current_month
         path = (f"{CURRENT_DIR}/garmin_{month}.json" if is_current
                 else f"{HISTORY_DIR}/garmin_history_{month}.json")
-        if not is_current and verify_monthly_history_file(dbx, month, month_summaries):
-            completed.append(month)
-            continue
+        recent_summaries = [
+            summary for summary in month_summaries
+            if activity_datetime({"summary": summary}).date() >= refresh_start
+        ]
 
-        LOG.info("MONTH %s: %d activities; exporting full-month health history",
-                 month, len(month_summaries))
-        month_rows = activity_records(cli, month_summaries) if month_summaries else []
-        enrich_gear_records(month_rows, gear_registry, activity_to_gear)
+        # Months entirely outside the rolling window remain untouched.
+        if not is_current and not recent_summaries:
+            if verify_monthly_history_file(dbx, month, month_summaries):
+                completed.append(month)
+                continue
+
+        existing = read_dropbox(dbx, path) if dropbox_file_exists(dbx, path) else None
+        existing_rows = existing.get("activities") if isinstance(existing, dict) else None
+        existing_ids = [
+            activity_id(row.get("summary", {}))
+            for row in existing_rows if isinstance(row, dict)
+        ] if isinstance(existing_rows, list) else []
+        expected_ids = [activity_id(summary) for summary in month_summaries]
+        existing_valid = (
+            isinstance(existing, dict)
+            and existing.get("metadata", {}).get("export_status") == "complete"
+            and isinstance(existing_rows, list)
+            and len(existing_ids) == len(existing_rows)
+            and None not in existing_ids
+            and len(existing_ids) == len(set(existing_ids))
+            and set(existing_ids) == set(expected_ids)
+        )
+        if existing_valid and not is_current:
+            old_health = existing.get("health", {})
+            old_health_meta = old_health.get("metadata", {}) if isinstance(old_health, dict) else {}
+            existing_valid = (
+                isinstance(old_health, dict)
+                and isinstance(old_health.get("by_date"), dict)
+                and old_health_meta.get("history_scope") == "full_month_all_available_dates"
+            )
+
+        if existing_valid:
+            # Re-fetch only activity details inside the rolling 30-day window.
+            refreshed_rows = activity_records(cli, recent_summaries) if recent_summaries else []
+            enrich_gear_records(refreshed_rows, gear_registry, activity_to_gear)
+            refreshed_ids = [activity_id(row.get("summary", {})) for row in refreshed_rows]
+            expected_recent_ids = [activity_id(summary) for summary in recent_summaries]
+            if (len(refreshed_ids) != len(expected_recent_ids)
+                    or None in refreshed_ids
+                    or len(refreshed_ids) != len(set(refreshed_ids))
+                    or set(refreshed_ids) != set(expected_recent_ids)):
+                raise RuntimeError(
+                    f"MONTH {month}: incomplete refreshed activity details; file not published"
+                )
+
+            rows_by_id = {
+                activity_id(row.get("summary", {})): row for row in existing_rows
+            }
+            for row in refreshed_rows:
+                rows_by_id[activity_id(row.get("summary", {}))] = row
+            month_rows = sorted(rows_by_id.values(), key=activity_datetime)
+
+            if not is_current:
+                # Keep the already complete monthly health history unchanged.
+                save_monthly_history_file(
+                    dbx, month, month_rows, existing.get("profile"),
+                    existing.get("heart_rate_zones"), existing.get("health"),
+                    gear_registry, force_refresh=True,
+                )
+                completed.append(month)
+                LOG.info(
+                    "MONTH %s: refreshed %d activities within rolling 30-day window; "
+                    "preserved %d older activities",
+                    month, len(refreshed_rows), len(month_rows) - len(refreshed_rows),
+                )
+                continue
+        else:
+            # Missing/incomplete files retain the original full-month recovery path.
+            month_rows = activity_records(cli, month_summaries) if month_summaries else []
+            enrich_gear_records(month_rows, gear_registry, activity_to_gear)
+
         got = [activity_id(row.get("summary", {})) for row in month_rows]
         expected = [activity_id(row) for row in month_summaries]
         if (len(got) != len(expected) or None in got or len(got) != len(set(got))
