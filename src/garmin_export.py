@@ -349,7 +349,7 @@ def optional(cli: GarminCLI, errors: list[dict[str, str]],
         message = str(exc)
         # Garmin may return 404 when a date has no recorded value. Treat that
         # as an ordinary gap; genuine transport/auth/API failures remain errors.
-        if re.search(r"HTTP\s*404|status(?:_code)?[=: ]+404|not found|no data", message, re.I):
+        if re.search(r"\b404\b|no data available|no data for (?:this )?(?:date|period)", message, re.I):
             LOG.info("%s: no data available", label)
             return True, None
         LOG.error("%s failed: %s", label, exc)
@@ -647,7 +647,9 @@ def verify_monthly_history_file(dbx: dropbox.Dropbox, month: str,
     status = existing.get("metadata", {}).get("export_status")
     health = existing.get("health", {})
     health_meta = health.get("metadata", {}) if isinstance(health, dict) else {}
-    if not isinstance(health, dict) or not isinstance(health.get("by_date"), dict) or not health_meta.get("history_scope"):
+    if (not isinstance(health, dict)
+            or not isinstance(health.get("by_date"), dict)
+            or health_meta.get("history_scope") != "full_month_all_available_dates"):
         LOG.info("Existing %s lacks full-history daily health; rebuilding month", path)
         return False
     if status == "partial":
@@ -687,7 +689,7 @@ def save_monthly_history_file(dbx: dropbox.Dropbox, month: str,
         if (existing.get("metadata", {}).get("export_status") == "complete"
                 and isinstance(old_health, dict)
                 and isinstance(old_health.get("by_date"), dict)
-                and old_health_meta.get("history_scope")):
+                and old_health_meta.get("history_scope") == "full_month_all_available_dates"):
             return
         mode = WriteMode.overwrite
     data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
