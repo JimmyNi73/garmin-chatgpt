@@ -629,7 +629,8 @@ def monthly_payload(month: str, rows: list[dict[str, Any]], profile: Any,
         "period": {"start_date": start, "end_date": end},
         "profile": profile, "heart_rate_zones": zones,
         "devices": device_registry(rows),
-        "gear_registry": [{"gear_id": key, **value} for key, value in GEAR_REGISTRY.items()],
+        "gear_registry": [{"gear_id": key, **value}
+                          for key, value in (gear_registry or GEAR_REGISTRY).items()],
         "activities": rows,
         "health": health or {},
     }
