@@ -759,89 +759,96 @@ def main() -> None:
     ensure_dropbox_folders(dbx)
 
     today = datetime.now(TZ).date()
-    current_year = today.year
+    current_month = today.strftime("%Y-%m")
     cli = GarminCLI()
     gear_registry, activity_to_gear = fetch_gear_data(cli)
-    archived_years: list[int] = []
-    skipped_years: list[int] = []
 
-    # Each historical year is a separate transaction: fetch its index, fetch all
-    # details, validate, then publish before touching the next year.
-    for year in range(2000, current_year):
-        start_date = date(year, 1, 1)
-        end_date = date(year, 12, 31)
-        LOG.info("YEAR %d: starting activity index fetch (%s to %s)",
-                 year, start_date.isoformat(), end_date.isoformat())
-        summaries = fetch_activities(cli, start_date.isoformat(), end_date.isoformat())
-        ids = [activity_id(x) for x in summaries]
-        if any(x is None for x in ids) or len(ids) != len(set(ids)):
+    # Collect every activity index year first, then build a continuous month
+    # calendar from the earliest activity through the current month. Months
+    # without activities are still exported because health data exists without
+    # a recorded workout.
+    summaries_by_month: dict[str, list[dict[str, Any]]] = {}
+    for year in range(2000, today.year + 1):
+        year_start = date(year, 1, 1)
+        year_end = min(date(year, 12, 31), today)
+        summaries = fetch_activities(cli, year_start.isoformat(), year_end.isoformat())
+        ids = [activity_id(row) for row in summaries]
+        if any(value is None for value in ids) or len(ids) != len(set(ids)):
             raise RuntimeError(f"YEAR {year}: Garmin index contains missing or duplicate activity IDs")
-
-        by_month: dict[str, list[dict[str, Any]]] = {}
         for summary in summaries:
-            by_month.setdefault(month_of_activity({"summary": summary}), []).append(summary)
-        for month, month_summaries in sorted(by_month.items()):
-            if verify_monthly_history_file(dbx, month, month_summaries):
-                continue
-            LOG.info("MONTH %s: downloading details for %d activities",
-                     month, len(month_summaries))
-            month_rows = activity_records(cli, month_summaries)
-            enrich_gear_records(month_rows, gear_registry, activity_to_gear)
-            got = [activity_id(x.get("summary", {})) for x in month_rows]
-            expected = [activity_id(x) for x in month_summaries]
-            if (len(got) != len(expected) or None in got or
-                    len(got) != len(set(got)) or set(got) != set(expected)):
-                raise RuntimeError(f"MONTH {month}: incomplete details; file not published")
-            errors: list[dict[str, str]] = []
-            p_ok, profile = optional(cli, errors, f"profile-settings {month}", "profile-settings")
-            z_ok, zones = optional(cli, errors, f"heart-rate-zones {month}", "heart-rate-zones")
-            health = fetch_month_health(cli, month)
+            month = month_of_activity({"summary": summary})
+            summaries_by_month.setdefault(month, []).append(summary)
+
+    if not summaries_by_month:
+        raise RuntimeError("Garmin returned no activities; cannot determine the start of available history")
+    first_month = min(summaries_by_month)
+    first_date = date.fromisoformat(first_month + "-01")
+    months: list[str] = []
+    cursor = first_date
+    while cursor <= today.replace(day=1):
+        months.append(cursor.strftime("%Y-%m"))
+        cursor = date(cursor.year + (cursor.month == 12),
+                      cursor.month % 12 + 1, 1)
+
+    completed: list[str] = []
+    rebuilt: list[str] = []
+    for month in months:
+        month_summaries = summaries_by_month.get(month, [])
+        is_current = month == current_month
+        path = (f"{CURRENT_DIR}/garmin_{month}.json" if is_current
+                else f"{HISTORY_DIR}/garmin_history_{month}.json")
+        if not is_current and verify_monthly_history_file(dbx, month, month_summaries):
+            completed.append(month)
+            continue
+
+        LOG.info("MONTH %s: %d activities; exporting full-month health history",
+                 month, len(month_summaries))
+        month_rows = activity_records(cli, month_summaries) if month_summaries else []
+        enrich_gear_records(month_rows, gear_registry, activity_to_gear)
+        got = [activity_id(row.get("summary", {})) for row in month_rows]
+        expected = [activity_id(row) for row in month_summaries]
+        if (len(got) != len(expected) or None in got or len(got) != len(set(got))
+                or set(got) != set(expected)):
+            raise RuntimeError(f"MONTH {month}: incomplete activity details; file not published")
+
+        errors: list[dict[str, str]] = []
+        p_ok, profile = optional(cli, errors, f"profile-settings {month}", "profile-settings")
+        z_ok, zones = optional(cli, errors, f"heart-rate-zones {month}", "heart-rate-zones")
+        health = fetch_month_health(cli, month)
+        month_errors = errors + health.get("source_errors", [])
+        health.setdefault("metadata", {})["export_status"] = (
+            "complete" if not month_errors else "partial")
+        health["metadata"]["source_error_count"] = len(month_errors)
+
+        payload = monthly_payload(
+            month, month_rows, profile if p_ok else None, zones if z_ok else None,
+            "current_month" if is_current else "immutable_activity_history_monthly",
+            health)
+        payload["metadata"]["export_status"] = (
+            "complete" if not month_errors else "partial")
+        payload["metadata"]["source_error_count"] = len(month_errors)
+        payload["metadata"]["history_scope"] = "full_month_all_available_dates"
+        payload["metadata"]["gear_link_count"] = sum(
+            1 for row in month_rows if isinstance(row.get("gear"), dict))
+        if is_current:
+            upload_json(dbx, path, payload)
+        else:
             save_monthly_history_file(dbx, month, month_rows,
-                                      profile if p_ok else None, zones if z_ok else None,
-                                      health)
-        archived_years.append(year)
+                                      profile if p_ok else None,
+                                      zones if z_ok else None, health)
+        if month_errors:
+            raise RuntimeError(
+                f"MONTH {month}: export is partial ({len(month_errors)} source errors); "
+                "fix the source/API issue and rerun to resume safely")
+        completed.append(month)
+        LOG.info("MONTH %s: complete (%d activities, %d daily dates)",
+                 month, len(month_rows), len(health.get("by_date", {})))
 
-    # Current year is deliberately separate and contains year-to-date activities.
-    LOG.info("CURRENT %d: fetching year-to-date activity index", current_year)
-    current_summaries = fetch_activities(
-        cli, date(current_year, 1, 1).isoformat(), today.isoformat())
-    current_ids = [activity_id(x) for x in current_summaries]
-    if any(x is None for x in current_ids) or len(current_ids) != len(set(current_ids)):
-        raise RuntimeError("CURRENT: Garmin index contains missing or duplicate activity IDs")
-    LOG.info("CURRENT %d: downloading details for %d activities",
-             current_year, len(current_summaries))
-    current_rows = activity_records(cli, current_summaries)
-    row_ids = [activity_id(x.get("summary", {})) for x in current_rows]
-    if (len(current_rows) != len(current_summaries) or None in row_ids
-            or len(row_ids) != len(set(row_ids)) or set(row_ids) != set(current_ids)):
-        raise RuntimeError("CURRENT: activity detail export incomplete; refusing upload")
-
-    current = build_current(cli, today, None, current_rows)
-    enrich_gear_records(current_rows, gear_registry, activity_to_gear)
-    current["gear_registry"] = [
-        {"gear_id": gear_id, **gear}
-        for gear_id, gear in gear_registry.items()
-    ]
-    uploaded_months: list[str] = []
-    for month, month_rows in group_by_month(current_rows).items():
-        month_start, month_end = month_bounds(month)
-        monthly = dict(current)
-        monthly["activities"] = month_rows
-        monthly["period"] = {"start_date": month_start,
-                             "end_date": min(date.fromisoformat(month_end), today).isoformat()}
-        monthly["metadata"] = dict(current["metadata"])
-        monthly["metadata"].update({"file_role": "rolling_current_month",
-                                    "month": month, "activity_count": len(month_rows)})
-        path = f"{CURRENT_DIR}/garmin_{month}.json"
-        upload_json(dbx, path, monthly)
-        uploaded_months.append(month)
-
-    LOG.info("Finished. Newly archived years: %s; verified/skipped years: %s; "
-             "current year %d monthly files: %s; activities: %d; Garmin requests: %d",
-             ", ".join(map(str, archived_years)) or "none",
-             ", ".join(map(str, skipped_years)) or "none",
-             current_year, ", ".join(uploaded_months) or "none",
-             len(current_rows), cli.request_count)
+    LOG.info("Finished full-history export. Months complete: %d (%s to %s); "
+             "activities: %d; gear links: %d; Garmin requests: %d",
+             len(completed), first_month, current_month,
+             sum(len(rows) for rows in summaries_by_month.values()),
+             len(activity_to_gear), cli.request_count)
 
 
 if __name__ == "__main__":
