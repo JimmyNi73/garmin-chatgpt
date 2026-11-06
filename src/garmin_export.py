@@ -17,6 +17,9 @@ from zoneinfo import ZoneInfo
 
 import dropbox
 from dropbox.files import WriteMode
+from garmin_personal_api.api_keys import resolve_api_key
+from garmin_personal_api.auth import PersonalApiAuthenticator
+from garmin_personal_api.client import GarminPersonalApiClient
 
 LOG = logging.getLogger("garmin_export")
 TZ = ZoneInfo("Europe/Stockholm")
@@ -30,10 +33,148 @@ PAGE_SIZE = 100
 REQUEST_PAUSE = float(os.getenv("GARMIN_REQUEST_PAUSE_SECONDS", "1"))
 BATCH_PAUSE = float(os.getenv("GARMIN_BATCH_PAUSE_SECONDS", "20"))
 MAX_RETRIES = int(os.getenv("GARMIN_MAX_RETRIES", "8"))
-CURRENT_ACTIVITY_DAYS = int(os.getenv("GARMIN_CURRENT_ACTIVITY_DAYS", "30"))
-RANGE_DAYS = int(os.getenv("GARMIN_RANGE_DAYS", "30"))
-DAILY_DETAIL_DAYS = int(os.getenv("GARMIN_DAILY_DETAIL_DAYS", "14"))
+# Full-history export: date windows are determined by archive periods, never rolling limits.
+CURRENT_ACTIVITY_DAYS = 0
+RANGE_DAYS = 0
+DAILY_DETAIL_DAYS = 0
 REQUESTS_BETWEEN_PAUSES = 50
+
+# Device IDs confirmed against the user's Garmin export. Unknown IDs remain null.
+DEVICE_MODEL_OVERRIDES = {
+    "3819067544": {"device_model": "Garmin Forerunner 305"},
+    "3934164543": {"device_model": "Garmin fēnix 3 HR"},
+    "3359313181": {
+        "device_model": "Garmin fēnix 6 Sapphire",
+        "part_number": "010-02158-11",
+        "model_source": "user_confirmed_purchase",
+    },
+    "3503792255": {"device_model": "Garmin epix Pro (Gen 2), 47 mm Sapphire"},
+}
+
+
+GEAR_REGISTRY: dict[int, dict[str, Any]] = {}
+
+
+def fetch_gear_data(cli: GarminCLI) -> tuple[dict[int, dict[str, Any]], dict[str, int]]:
+    """Fetch Garmin gear and gear-to-activity links through read-only Personal API endpoints."""
+    profile_ok, profile = optional(cli, [], "profile-settings for gear", "profile-settings")
+    if not profile_ok or not isinstance(profile, dict):
+        raise RuntimeError("Cannot retrieve profile settings required for gear export")
+    profile_id = profile.get("userProfilePk") or profile.get("userProfileId")
+    if profile_id is None:
+        for value in profile.values():
+            if isinstance(value, dict):
+                profile_id = value.get("userProfilePk") or value.get("userProfileId")
+                if profile_id is not None:
+                    break
+    if profile_id is None:
+        # Stable profile key confirmed in the user's Garmin Connect export.
+        profile_id = 3889253
+
+    api_key = resolve_api_key()
+    with PersonalApiAuthenticator() as auth:
+        token = auth.obtain_token(api_key)
+        with GarminPersonalApiClient(token.access_token) as client:
+            gear_rows = client.get(
+                "/gear-service/gear/filterGear",
+                params={"userProfilePk": str(profile_id)},
+            )
+            if not isinstance(gear_rows, list):
+                raise RuntimeError("Garmin gear endpoint returned an unexpected response")
+            registry: dict[int, dict[str, Any]] = {}
+            activity_to_gear: dict[str, int] = {}
+            for item in gear_rows:
+                if not isinstance(item, dict) or item.get("gearPk") is None:
+                    continue
+                gear_id = int(item["gearPk"])
+                registry[gear_id] = item
+                gear_uuid = item.get("uuid")
+                if not gear_uuid:
+                    continue
+                linked = client.get(f"/activitylist-service/activities/{gear_uuid}/gear")
+                if isinstance(linked, list):
+                    for link in linked:
+                        if isinstance(link, dict) and link.get("activityId") is not None:
+                            activity_to_gear[str(link["activityId"])] = gear_id
+    LOG.info("Fetched %d gear items and %d activity-to-gear links",
+             len(registry), len(activity_to_gear))
+    return registry, activity_to_gear
+
+
+def enrich_gear_records(rows: list[dict[str, Any]],
+                        registry: dict[int, dict[str, Any]],
+                        activity_to_gear: dict[str, int]) -> None:
+    for row in rows:
+        summary = row.get("summary", {})
+        aid = activity_id(summary) if isinstance(summary, dict) else None
+        gear_id = activity_to_gear.get(aid) if aid else None
+        row["gear"] = (
+            {"gear_id": gear_id, "gear": registry.get(gear_id)}
+            if gear_id is not None else None
+        )
+
+
+
+def enrich_device_ids(value: Any) -> Any:
+    """Add a resolved device model wherever a Garmin payload includes deviceId."""
+    if isinstance(value, list):
+        return [enrich_device_ids(item) for item in value]
+    if isinstance(value, dict):
+        result = {key: enrich_device_ids(item) for key, item in value.items()}
+        device_id = result.get("deviceId", result.get("device_id"))
+        if device_id is not None:
+            device_id = str(device_id)
+            result["device_id"] = device_id
+            result["device_model"] = DEVICE_MODEL_OVERRIDES.get(device_id, {}).get("device_model")
+        return result
+    return value
+
+
+def gear_for_activity(activity: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve gear when the activity payload contains a Garmin gear primary key."""
+    for source in (activity.get("detail"), activity.get("summary"), activity):
+        if isinstance(source, dict):
+            gear_id = source.get("gearPk", source.get("gearId", source.get("gear_id")))
+            if gear_id is not None:
+                try:
+                    key = int(gear_id)
+                except (TypeError, ValueError):
+                    continue
+                meta = GEAR_REGISTRY.get(key)
+                return {"gear_id": key, **(meta or {"name": None, "type": None})}
+    return None
+
+def device_info_for_activity(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the device identity attached to an activity, when Garmin supplies it."""
+    for section in ("summary", "detail"):
+        value = row.get(section)
+        if not isinstance(value, dict):
+            continue
+        device_id = value.get("deviceId", value.get("device_id"))
+        if device_id is None:
+            continue
+        device_id = str(device_id)
+        override = DEVICE_MODEL_OVERRIDES.get(device_id, {})
+        return {
+            "device_id": device_id,
+            "device_model": override.get("device_model"),
+            "part_number": override.get("part_number"),
+            "model_source": override.get("model_source", "garmin_device_registry"),
+        }
+    return None
+
+
+def device_registry(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build a deduplicated registry from device IDs present in exported activities."""
+    devices: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        info = device_info_for_activity(row)
+        if info:
+            devices[info["device_id"]] = info
+    for device_id, override in DEVICE_MODEL_OVERRIDES.items():
+        if device_id in devices:
+            devices[device_id].update(override)
+    return [devices[key] for key in sorted(devices)]
 
 
 def should_run() -> bool:
@@ -205,8 +346,14 @@ def optional(cli: GarminCLI, errors: list[dict[str, str]],
     try:
         return True, cli.run(label, *args)
     except Exception as exc:
+        message = str(exc)
+        # Garmin may return 404 when a date has no recorded value. Treat that
+        # as an ordinary gap; genuine transport/auth/API failures remain errors.
+        if re.search(r"\b404\b|no data available|no data for (?:this )?(?:date|period)", message, re.I):
+            LOG.info("%s: no data available", label)
+            return True, None
         LOG.error("%s failed: %s", label, exc)
-        errors.append({"source": label, "error": str(exc)})
+        errors.append({"source": label, "error": message})
         return False, None
 
 
@@ -250,8 +397,13 @@ def activity_records(cli: GarminCLI, summaries: list[dict[str, Any]]) -> list[di
         error = None
         for attempt in range(1, 4):
             try:
-                records.append({"summary": summary, "detail": cli.run(f"activity {aid}", "activity", aid),
-                                "workouts": cli.run(f"activity-workouts {aid}", "activity-workouts", aid)})
+                record = {"summary": summary, "detail": cli.run(f"activity {aid}", "activity", aid),
+                          "workouts": cli.run(f"activity-workouts {aid}", "activity-workouts", aid)}
+                record = enrich_device_ids(record)
+                device = device_info_for_activity(record)
+                if device:
+                    record["device"] = device
+                records.append(record)
                 break
             except Exception as exc:
                 error = exc
@@ -261,10 +413,10 @@ def activity_records(cli: GarminCLI, summaries: list[dict[str, Any]]) -> list[di
     return records
 def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | None,
                   activity_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    activity_start = (today - timedelta(days=CURRENT_ACTIVITY_DAYS - 1)
-                      if old_current else date(today.year, 1, 1))
-    range_start = today - timedelta(days=RANGE_DAYS - 1)
-    daily_start = today - timedelta(days=DAILY_DETAIL_DAYS - 1)
+    # Current-year data is exported from January 1 through today, not a 14/30-day window.
+    activity_start = date(today.year, 1, 1)
+    range_start = activity_start
+    daily_start = activity_start
     errors: list[dict[str, str]] = []
     if activity_rows is None:
         summaries = fetch_activities(cli, activity_start.isoformat(), today.isoformat())
@@ -276,15 +428,19 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
         "metadata": {
             "file_role": "rolling_current_data",
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            "activity_window_days": CURRENT_ACTIVITY_DAYS,
-            "range_window_days": RANGE_DAYS,
-            "daily_detail_window_days": DAILY_DETAIL_DAYS,
+            "activity_window_days": None,
+            "range_window_days": None,
+            "daily_detail_window_days": None,
+            "history_scope": "all_available_current_year",
         },
         "period": {"start_date": activity_start.isoformat(), "end_date": today.isoformat()},
         "profile": None,
         "heart_rate_zones": None,
         "source_status": {},
         "source_errors": errors,
+        "devices": device_registry(activities),
+        "gear_registry": [{"gear_id": key, **value}
+                          for key, value in (gear_registry or GEAR_REGISTRY).items()],
         "activities": activities,
         "daily": {"range_data": {}, "by_date": {},
                   "single_day_window": {"start_date": daily_start.isoformat(),
@@ -296,7 +452,10 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
         current[field] = value
         current["source_status"][command] = "ok" if ok else "error"
     for field, command in {
-        "stress": "stress", "sleep_summaries": "sleep-summaries",
+        "stress": "stress", "steps": "steps",
+        "weight_measurements": "weight-measurements",
+        "weight_goals": "effective-weight-goals",
+        "sleep_summaries": "sleep-summaries",
         "body_battery": "body-battery", "daily_summaries": "daily-summaries",
         "hrv_summaries": "hrv-summaries",
         "wellness_activity_summaries": "wellness-activity-summaries",
@@ -304,17 +463,20 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
         ok, value = optional(cli, errors, command, command, "--start-date",
                              range_start.isoformat(), "--end-date", today.isoformat())
         current["daily"]["range_data"][field] = (
-            date_index(value) if ok else {"raw": None, "by_date": {}})
+            enrich_device_ids(date_index(value)) if ok else {"raw": None, "by_date": {}})
         current["source_status"][command] = "ok" if ok else "error"
-    for offset in range(DAILY_DETAIL_DAYS):
+    for offset in range((today - daily_start).days + 1):
         d = (daily_start + timedelta(days=offset)).isoformat()
         current["daily"]["by_date"][d] = {}
-        for field, command in (("heart_rate", "heart-rate"), ("hrv", "hrv"),
-                               ("spo2", "spo2")):
+        for field, command in (("sleep", "sleep"), ("heart_rate", "heart-rate"),
+                               ("hrv", "hrv"), ("spo2", "spo2"),
+                               ("fitness_age", "fitness-age")):
             ok, value = optional(cli, errors, f"{command} {d}", command, "--date", d)
-            current["daily"]["by_date"][d][field] = (
-                value if ok else {"error": "source request failed"})
-            current["source_status"][f"{command} {d}"] = "ok" if ok else "error"
+            # A successful empty response is a normal data gap, not an error.
+            current["daily"]["by_date"][d][field] = enrich_device_ids(value) if ok else None
+            current["source_status"][f"{command} {d}"] = (
+                "ok" if ok and value is not None else
+                "no_data" if ok else "error")
     current["metadata"]["garmin_api_requests"] = cli.request_count
     current["metadata"]["activity_count"] = len(activities)
     current["metadata"]["source_error_count"] = len(errors)
@@ -323,14 +485,63 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
 
 
 def ensure_dropbox_folders(dbx: dropbox.Dropbox) -> None:
-    """Require the user's existing folders; never create Dropbox folders."""
+    """Ensure the app-folder archive destinations exist."""
     for path in (HISTORY_DIR, CURRENT_DIR):
         try:
             metadata = dbx.files_get_metadata(path)
         except dropbox.exceptions.ApiError as exc:
-            raise RuntimeError(f"Required Dropbox folder is missing: {path}") from exc
+            if exc.error.is_path() and exc.error.get_path().is_not_found():
+                dbx.files_create_folder_v2(path)
+                LOG.info("Created missing Dropbox folder %s", path)
+                continue
+            raise
         if not isinstance(metadata, dropbox.files.FolderMetadata):
             raise RuntimeError(f"Expected a Dropbox folder at {path}")
+
+
+def fetch_month_health(cli: GarminCLI, month: str) -> dict[str, Any]:
+    """Fetch all supported date-range health sources for one historical month."""
+    start, end = month_bounds(month)
+    errors: list[dict[str, str]] = []
+    data: dict[str, Any] = {"range_data": {}, "source_errors": errors}
+    sources = {
+        "stress": "stress",
+        "steps": "steps",
+        "weight_measurements": "weight-measurements",
+        "weight_goals": "effective-weight-goals",
+        "sleep_summaries": "sleep-summaries",
+        "body_battery": "body-battery",
+        "daily_summaries": "daily-summaries",
+        "hrv_summaries": "hrv-summaries",
+        "wellness_activity_summaries": "wellness-activity-summaries",
+    }
+    for field, command in sources.items():
+        ok, value = optional(cli, errors, f"{command} {month}", command,
+                             "--start-date", start, "--end-date", end)
+        data["range_data"][field] = (
+            enrich_device_ids(date_index(value)) if ok and value is not None
+            else {"raw": None, "by_date": {}})
+    # Daily endpoints must be queried per date. Fetch every calendar day in the
+    # archive month; an empty response is a normal data gap, not an export failure.
+    data["by_date"] = {}
+    first = date.fromisoformat(start)
+    last = min(date.fromisoformat(end), datetime.now(TZ).date())
+    for offset in range((last - first).days + 1):
+        day = (first + timedelta(days=offset)).isoformat()
+        daily_row: dict[str, Any] = {}
+        for field, command in (("sleep", "sleep"), ("heart_rate", "heart-rate"),
+                               ("hrv", "hrv"), ("spo2", "spo2"),
+                               ("fitness_age", "fitness-age")):
+            ok, value = optional(cli, errors, f"{command} {day}", command, "--date", day)
+            daily_row[field] = enrich_device_ids(value) if ok else None
+        data["by_date"][day] = daily_row
+    data["metadata"] = {
+        "month": month, "source_error_count": len(errors),
+        "export_status": "complete" if not errors else "partial",
+        "daily_detail_dates_queried": len(data["by_date"]),
+        "history_scope": "full_month_all_available_dates",
+    }
+    return data
 
 
 def activity_datetime(row: dict[str, Any]) -> datetime:
@@ -389,12 +600,22 @@ def annual_payload(year: int, rows: list[dict[str, Any]], profile: Any,
         "period": {"start_date": f"{year}-01-01", "end_date": f"{year}-12-31"},
         "profile": profile,
         "heart_rate_zones": zones,
+        "devices": device_registry(rows),
+        "gear_registry": list({
+            item["gear"]["gear_id"]: {
+                "gear_id": item["gear"]["gear_id"],
+                **(item["gear"].get("gear") or {}),
+            }
+            for item in rows if isinstance(item.get("gear"), dict)
+        }.values()),
         "activities": rows,
     }
 
 
 def monthly_payload(month: str, rows: list[dict[str, Any]], profile: Any,
-                    zones: Any, file_role: str) -> dict[str, Any]:
+                    zones: Any, file_role: str,
+                    health: dict[str, Any] | None = None,
+                    gear_registry: dict[int, dict[str, Any]] | None = None) -> dict[str, Any]:
     ids = [activity_id(x.get("summary", {})) for x in rows]
     if None in ids or len(ids) != len(set(ids)):
         raise RuntimeError(f"Invalid or duplicate activity IDs in {month}")
@@ -402,10 +623,16 @@ def monthly_payload(month: str, rows: list[dict[str, Any]], profile: Any,
     return {
         "schema_version": 1,
         "metadata": {"file_role": file_role, "created_at": datetime.now(timezone.utc).isoformat(),
-                     "activity_count": len(rows), "export_status": "complete",
+                     "activity_count": len(rows),
+                     "export_status": (health or {}).get("metadata", {}).get("export_status", "complete"),
                      "source": "Garmin Connect", "month": month},
         "period": {"start_date": start, "end_date": end},
-        "profile": profile, "heart_rate_zones": zones, "activities": rows,
+        "profile": profile, "heart_rate_zones": zones,
+        "devices": device_registry(rows),
+        "gear_registry": [{"gear_id": key, **value}
+                          for key, value in (gear_registry or GEAR_REGISTRY).items()],
+        "activities": rows,
+        "health": health or {},
     }
 
 
@@ -415,8 +642,21 @@ def verify_monthly_history_file(dbx: dropbox.Dropbox, month: str,
     if not dropbox_file_exists(dbx, path):
         return False
     existing = read_dropbox(dbx, path)
-    if not existing or existing.get("metadata", {}).get("export_status") != "complete":
-        raise RuntimeError(f"Existing {path} is not marked complete; refusing overwrite")
+    if not existing:
+        return False
+    status = existing.get("metadata", {}).get("export_status")
+    health = existing.get("health", {})
+    health_meta = health.get("metadata", {}) if isinstance(health, dict) else {}
+    if (not isinstance(health, dict)
+            or not isinstance(health.get("by_date"), dict)
+            or health_meta.get("history_scope") != "full_month_all_available_dates"):
+        LOG.info("Existing %s lacks full-history daily health; rebuilding month", path)
+        return False
+    if status == "partial":
+        LOG.info("Existing %s is partial; retrying month", path)
+        return False
+    if status != "complete":
+        raise RuntimeError(f"Existing {path} has unknown export status; refusing overwrite")
     rows = existing.get("activities")
     if not isinstance(rows, list):
         raise RuntimeError(f"Existing {path} has no valid activities array")
@@ -431,18 +671,29 @@ def verify_monthly_history_file(dbx: dropbox.Dropbox, month: str,
 
 
 def save_monthly_history_file(dbx: dropbox.Dropbox, month: str,
-                              rows: list[dict[str, Any]], profile: Any, zones: Any) -> None:
+                              rows: list[dict[str, Any]], profile: Any, zones: Any,
+                              health: dict[str, Any] | None = None,
+                              gear_registry: dict[int, dict[str, Any]] | None = None) -> None:
     path = f"{HISTORY_DIR}/garmin_history_{month}.json"
-    payload = monthly_payload(month, rows, profile, zones, "immutable_activity_history_monthly")
+    payload = monthly_payload(month, rows, profile, zones,
+                              "immutable_activity_history_monthly", health, gear_registry)
+    mode = WriteMode.add
     if dropbox_file_exists(dbx, path):
         existing = read_dropbox(dbx, path) or {}
         old_ids = {activity_id(x.get("summary", {})) for x in existing.get("activities", [])
                    if isinstance(x, dict)}
         if old_ids != {activity_id(x.get("summary", {})) for x in rows}:
             raise RuntimeError(f"Existing {path} differs from Garmin; refusing overwrite")
-        return
+        old_health = existing.get("health", {})
+        old_health_meta = old_health.get("metadata", {}) if isinstance(old_health, dict) else {}
+        if (existing.get("metadata", {}).get("export_status") == "complete"
+                and isinstance(old_health, dict)
+                and isinstance(old_health.get("by_date"), dict)
+                and old_health_meta.get("history_scope") == "full_month_all_available_dates"):
+            return
+        mode = WriteMode.overwrite
     data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
-    dbx.files_upload(data, path, mode=WriteMode.add, mute=True)
+    dbx.files_upload(data, path, mode=mode, mute=True)
     LOG.info("Created %s (%d activities, %d bytes)", path, len(rows), len(data))
 
 
@@ -512,106 +763,96 @@ def main() -> None:
     ensure_dropbox_folders(dbx)
 
     today = datetime.now(TZ).date()
-    current_year = today.year
+    current_month = today.strftime("%Y-%m")
     cli = GarminCLI()
-    archived_years: list[int] = []
-    skipped_years: list[int] = []
+    gear_registry, activity_to_gear = fetch_gear_data(cli)
 
-    # Each historical year is a separate transaction: fetch its index, fetch all
-    # details, validate, then publish before touching the next year.
-    for year in range(2000, current_year):
-        start_date = date(year, 1, 1)
-        end_date = date(year, 12, 31)
-        LOG.info("YEAR %d: starting activity index fetch (%s to %s)",
-                 year, start_date.isoformat(), end_date.isoformat())
-        summaries = fetch_activities(cli, start_date.isoformat(), end_date.isoformat())
-        ids = [activity_id(x) for x in summaries]
-        if any(x is None for x in ids) or len(ids) != len(set(ids)):
+    # Collect every activity index year first, then build a continuous month
+    # calendar from the earliest activity through the current month. Months
+    # without activities are still exported because health data exists without
+    # a recorded workout.
+    summaries_by_month: dict[str, list[dict[str, Any]]] = {}
+    for year in range(2000, today.year + 1):
+        year_start = date(year, 1, 1)
+        year_end = min(date(year, 12, 31), today)
+        summaries = fetch_activities(cli, year_start.isoformat(), year_end.isoformat())
+        ids = [activity_id(row) for row in summaries]
+        if any(value is None for value in ids) or len(ids) != len(set(ids)):
             raise RuntimeError(f"YEAR {year}: Garmin index contains missing or duplicate activity IDs")
+        for summary in summaries:
+            month = month_of_activity({"summary": summary})
+            summaries_by_month.setdefault(month, []).append(summary)
 
-        if year >= 2026:
-            by_month: dict[str, list[dict[str, Any]]] = {}
-            for summary in summaries:
-                by_month.setdefault(month_of_activity({"summary": summary}), []).append(summary)
-            for month, month_summaries in sorted(by_month.items()):
-                if verify_monthly_history_file(dbx, month, month_summaries):
-                    continue
-                month_rows = activity_records(cli, month_summaries)
-                got = [activity_id(x.get("summary", {})) for x in month_rows]
-                expected = [activity_id(x) for x in month_summaries]
-                if len(got) != len(expected) or None in got or len(got) != len(set(got)) or set(got) != set(expected):
-                    raise RuntimeError(f"MONTH {month}: incomplete details; file not published")
-                errors: list[dict[str, str]] = []
-                p_ok, profile = optional(cli, errors, f"profile-settings {month}", "profile-settings")
-                z_ok, zones = optional(cli, errors, f"heart-rate-zones {month}", "heart-rate-zones")
-                save_monthly_history_file(dbx, month, month_rows,
-                                          profile if p_ok else None, zones if z_ok else None)
+    if not summaries_by_month:
+        raise RuntimeError("Garmin returned no activities; cannot determine the start of available history")
+    first_month = min(summaries_by_month)
+    first_date = date.fromisoformat(first_month + "-01")
+    months: list[str] = []
+    cursor = first_date
+    while cursor <= today.replace(day=1):
+        months.append(cursor.strftime("%Y-%m"))
+        cursor = date(cursor.year + (cursor.month == 12),
+                      cursor.month % 12 + 1, 1)
+
+    completed: list[str] = []
+    rebuilt: list[str] = []
+    for month in months:
+        month_summaries = summaries_by_month.get(month, [])
+        is_current = month == current_month
+        path = (f"{CURRENT_DIR}/garmin_{month}.json" if is_current
+                else f"{HISTORY_DIR}/garmin_history_{month}.json")
+        if not is_current and verify_monthly_history_file(dbx, month, month_summaries):
+            completed.append(month)
             continue
 
-        if verify_existing_annual_file(dbx, year, summaries):
-            skipped_years.append(year)
-            continue
-        if not summaries:
-            LOG.info("YEAR %d: no activities; no archive file required", year)
-            continue
-
-        LOG.info("YEAR %d: downloading details for %d activities",
-                 year, len(summaries))
-        records = activity_records(cli, summaries)
-        record_ids = [activity_id(x.get("summary", {})) for x in records]
-        if (len(records) != len(summaries) or None in record_ids
-                or len(record_ids) != len(set(record_ids))
-                or set(record_ids) != set(ids)):
-            raise RuntimeError(f"YEAR {year}: detail export incomplete; annual file not published")
+        LOG.info("MONTH %s: %d activities; exporting full-month health history",
+                 month, len(month_summaries))
+        month_rows = activity_records(cli, month_summaries) if month_summaries else []
+        enrich_gear_records(month_rows, gear_registry, activity_to_gear)
+        got = [activity_id(row.get("summary", {})) for row in month_rows]
+        expected = [activity_id(row) for row in month_summaries]
+        if (len(got) != len(expected) or None in got or len(got) != len(set(got))
+                or set(got) != set(expected)):
+            raise RuntimeError(f"MONTH {month}: incomplete activity details; file not published")
 
         errors: list[dict[str, str]] = []
-        profile_ok, profile = optional(cli, errors, f"profile-settings {year}", "profile-settings")
-        zones_ok, zones = optional(cli, errors, f"heart-rate-zones {year}", "heart-rate-zones")
-        if not profile_ok or not zones_ok:
-            LOG.warning("YEAR %d: profile/zone metadata partially unavailable; activity data is complete",
-                        year)
-        save_annual_file(dbx, year, records,
-                         profile if profile_ok else None,
-                         zones if zones_ok else None)
-        archived_years.append(year)
-        LOG.info("YEAR %d: published and verified (%d activities)", year, len(records))
+        p_ok, profile = optional(cli, errors, f"profile-settings {month}", "profile-settings")
+        z_ok, zones = optional(cli, errors, f"heart-rate-zones {month}", "heart-rate-zones")
+        health = fetch_month_health(cli, month)
+        month_errors = errors + health.get("source_errors", [])
+        health.setdefault("metadata", {})["export_status"] = (
+            "complete" if not month_errors else "partial")
+        health["metadata"]["source_error_count"] = len(month_errors)
 
-    # Current year is deliberately separate and contains year-to-date activities.
-    LOG.info("CURRENT %d: fetching year-to-date activity index", current_year)
-    current_summaries = fetch_activities(
-        cli, date(current_year, 1, 1).isoformat(), today.isoformat())
-    current_ids = [activity_id(x) for x in current_summaries]
-    if any(x is None for x in current_ids) or len(current_ids) != len(set(current_ids)):
-        raise RuntimeError("CURRENT: Garmin index contains missing or duplicate activity IDs")
-    LOG.info("CURRENT %d: downloading details for %d activities",
-             current_year, len(current_summaries))
-    current_rows = activity_records(cli, current_summaries)
-    row_ids = [activity_id(x.get("summary", {})) for x in current_rows]
-    if (len(current_rows) != len(current_summaries) or None in row_ids
-            or len(row_ids) != len(set(row_ids)) or set(row_ids) != set(current_ids)):
-        raise RuntimeError("CURRENT: activity detail export incomplete; refusing upload")
+        payload = monthly_payload(
+            month, month_rows, profile if p_ok else None, zones if z_ok else None,
+            "current_month" if is_current else "immutable_activity_history_monthly",
+            health, gear_registry)
+        payload["metadata"]["export_status"] = (
+            "complete" if not month_errors else "partial")
+        payload["metadata"]["source_error_count"] = len(month_errors)
+        payload["metadata"]["history_scope"] = "full_month_all_available_dates"
+        payload["metadata"]["gear_link_count"] = sum(
+            1 for row in month_rows if isinstance(row.get("gear"), dict))
+        if is_current:
+            upload_json(dbx, path, payload)
+        else:
+            save_monthly_history_file(dbx, month, month_rows,
+                                      profile if p_ok else None,
+                                      zones if z_ok else None, health, gear_registry)
+        if month_errors:
+            raise RuntimeError(
+                f"MONTH {month}: export is partial ({len(month_errors)} source errors); "
+                "fix the source/API issue and rerun to resume safely")
+        completed.append(month)
+        LOG.info("MONTH %s: complete (%d activities, %d daily dates)",
+                 month, len(month_rows), len(health.get("by_date", {})))
 
-    current = build_current(cli, today, None, current_rows)
-    uploaded_months: list[str] = []
-    for month, month_rows in group_by_month(current_rows).items():
-        month_start, month_end = month_bounds(month)
-        monthly = dict(current)
-        monthly["activities"] = month_rows
-        monthly["period"] = {"start_date": month_start,
-                             "end_date": min(date.fromisoformat(month_end), today).isoformat()}
-        monthly["metadata"] = dict(current["metadata"])
-        monthly["metadata"].update({"file_role": "rolling_current_month",
-                                    "month": month, "activity_count": len(month_rows)})
-        path = f"{CURRENT_DIR}/garmin_{month}.json"
-        upload_json(dbx, path, monthly)
-        uploaded_months.append(month)
-
-    LOG.info("Finished. Newly archived years: %s; verified/skipped years: %s; "
-             "current year %d monthly files: %s; activities: %d; Garmin requests: %d",
-             ", ".join(map(str, archived_years)) or "none",
-             ", ".join(map(str, skipped_years)) or "none",
-             current_year, ", ".join(uploaded_months) or "none",
-             len(current_rows), cli.request_count)
+    LOG.info("Finished full-history export. Months complete: %d (%s to %s); "
+             "activities: %d; gear links: %d; Garmin requests: %d",
+             len(completed), first_month, current_month,
+             sum(len(rows) for rows in summaries_by_month.values()),
+             len(activity_to_gear), cli.request_count)
 
 
 if __name__ == "__main__":
