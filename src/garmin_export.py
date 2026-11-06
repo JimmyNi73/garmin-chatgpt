@@ -907,12 +907,6 @@ def main() -> None:
             if activity_datetime({"summary": summary}).date() >= refresh_start
         ]
 
-        # Months entirely outside the rolling window remain untouched.
-        if not is_current and not recent_summaries:
-            if verify_monthly_history_file(dbx, month, month_summaries):
-                completed.append(month)
-                continue
-
         existing = read_dropbox(dbx, path) if dropbox_file_exists(dbx, path) else None
         existing_rows = existing.get("activities") if isinstance(existing, dict) else None
         existing_ids = [
@@ -959,19 +953,41 @@ def main() -> None:
                 rows_by_id[activity_id(row.get("summary", {}))] = row
             month_rows = sorted(rows_by_id.values(), key=activity_datetime)
 
+            # Apply the complete gear-to-activity map to every archived row,
+            # not only activities whose details were refreshed in the last 30 days.
+            old_gear_by_id = {
+                activity_id(row.get("summary", {})): row.get("gear")
+                for row in existing_rows
+            }
+            enrich_gear_records(month_rows, gear_registry, activity_to_gear)
+            new_gear_by_id = {
+                activity_id(row.get("summary", {})): row.get("gear")
+                for row in month_rows
+            }
+            gear_links_changed = old_gear_by_id != new_gear_by_id
+            new_gear_registry = [
+                {"gear_id": key, **value}
+                for key, value in sorted(gear_registry.items())
+            ]
+            gear_registry_changed = existing.get("gear_registry", []) != new_gear_registry
+
             if not is_current:
-                # Keep the already complete monthly health history unchanged.
-                save_monthly_history_file(
-                    dbx, month, month_rows, existing.get("profile"),
-                    existing.get("heart_rate_zones"), existing.get("health"),
-                    gear_registry, force_refresh=True,
-                )
+                # Preserve health history and avoid rewriting unchanged old months.
+                if recent_summaries or gear_links_changed or gear_registry_changed:
+                    save_monthly_history_file(
+                        dbx, month, month_rows, existing.get("profile"),
+                        existing.get("heart_rate_zones"), existing.get("health"),
+                        gear_registry, force_refresh=True,
+                    )
+                    LOG.info(
+                        "MONTH %s: refreshed %d recent activities; gear links changed=%s; "
+                        "preserved %d older activities",
+                        month, len(refreshed_rows), gear_links_changed or gear_registry_changed,
+                        len(month_rows) - len(refreshed_rows),
+                    )
+                else:
+                    LOG.info("MONTH %s: verified; no activity or gear changes", month)
                 completed.append(month)
-                LOG.info(
-                    "MONTH %s: refreshed %d activities within rolling 30-day window; "
-                    "preserved %d older activities",
-                    month, len(refreshed_rows), len(month_rows) - len(refreshed_rows),
-                )
                 continue
         else:
             # Missing/incomplete files retain the original full-month recovery path.
