@@ -523,6 +523,31 @@ def ensure_dropbox_folders(dbx: dropbox.Dropbox) -> None:
             raise RuntimeError(f"Expected a Dropbox folder at {path}")
 
 
+def optional_daily(cli: GarminCLI, unavailable: list[dict[str, str]],
+                  label: str, *args: str) -> tuple[bool, Any]:
+    """Retry transient daily-endpoint failures three times, then record a gap and continue."""
+    for attempt in range(1, 4):
+        try:
+            return True, cli.run(label, *args)
+        except Exception as exc:
+            message = str(exc)
+            if re.search(r"HTTP\\s*5\\d\\d|timed out|timeout|temporar", message, re.I):
+                if attempt < 3:
+                    wait = 5 * attempt
+                    LOG.warning("%s failed attempt %d/3; retrying in %d sec: %s",
+                                label, attempt, wait, message)
+                    time.sleep(wait)
+                    continue
+                LOG.warning("%s failed after 3 attempts; recording unavailable and continuing: %s",
+                            label, message)
+                unavailable.append({"source": label, "reason": "failed after 3 attempts: " + message})
+                return True, None
+            if re.search(r"\\b404\\b|no data available|no data for (?:this )?(?:date|period)", message, re.I):
+                LOG.info("%s: no data available", label)
+                return True, None
+            raise
+
+
 def fetch_month_health(cli: GarminCLI, month: str) -> dict[str, Any]:
     """Fetch all supported date-range health sources for one historical month."""
     start, end = month_bounds(month)
@@ -562,9 +587,9 @@ def fetch_month_health(cli: GarminCLI, month: str) -> dict[str, Any]:
         day = (first + timedelta(days=offset)).isoformat()
         daily_row: dict[str, Any] = {}
         for field, command in (("sleep", "sleep"), ("heart_rate", "heart-rate"),
-                               ("hrv", "hrv"), ("spo2", "spo2"),
-                               ("fitness_age", "fitness-age")):
-            ok, value = optional(cli, errors, f"{command} {day}", command, "--date", day)
+                               ("hrv", "hrv"), ("spo2", "spo2")):
+            ok, value = optional_daily(cli, unavailable, f"{command} {day}",
+                                       command, "--date", day)
             daily_row[field] = enrich_device_ids(value) if ok else None
         data["by_date"][day] = daily_row
     data["metadata"] = {
