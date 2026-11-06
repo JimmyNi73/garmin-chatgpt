@@ -1,5 +1,8 @@
+import json
 import sys
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, "src")
 import garmin_export as ge
@@ -37,6 +40,90 @@ class ExportHelperTests(unittest.TestCase):
     def test_unknown_device_is_null_not_guessed(self):
         row = ge.enrich_device_ids({"detail": {"deviceId": 999999}})
         self.assertIsNone(row["detail"]["device_model"])
+
+
+    def test_gear_only_backfill_preserves_non_gear_data(self):
+        class FakeResponse:
+            def __init__(self, content):
+                self.content = content
+            def close(self):
+                pass
+
+        class FakeDropbox:
+            def __init__(self):
+                self.files = {
+                    "/History/garmin_history_2011-01.json": {
+                        "metadata": {"export_status": "complete", "activity_count": 1},
+                        "activities": [{"summary": {"activityId": 123}, "gear": None,
+                                        "detail": {"keep": "unchanged"}}],
+                        "health": {"by_date": {"2011-01-01": {"steps": 10}}},
+                        "profile": {"keep": True},
+                    },
+                    "/Current/garmin_2026-11.json": {
+                        "metadata": {"export_status": "complete", "activity_count": 1},
+                        "activities": [{"summary": {"activityId": 456}, "gear": None}],
+                        "health": {"untouched": True},
+                    },
+                }
+                self.uploaded = []
+
+            def files_list_folder(self, folder):
+                entries = [
+                    SimpleNamespace(path_display=path, name=path.rsplit("/", 1)[-1])
+                    for path in self.files if path.startswith(folder + "/")
+                ]
+                return SimpleNamespace(entries=entries, has_more=False, cursor=None)
+
+            def files_download(self, path):
+                return None, FakeResponse(json.dumps(self.files[path]).encode("utf-8"))
+
+            def files_upload(self, data, path, mode=None, mute=True):
+                self.files[path] = json.loads(data.decode("utf-8"))
+                self.uploaded.append(path)
+
+        dbx = FakeDropbox()
+        original_output = ge.OUTPUT_DIR
+        ge.OUTPUT_DIR = Path("test-export-output")
+        try:
+            updated, activities, links = ge.backfill_gear_in_dropbox(
+                dbx,
+                {7: {"customMakeModel": "Brooks"}},
+                {"123": 7},
+            )
+        finally:
+            ge.OUTPUT_DIR = original_output
+
+        self.assertEqual((updated, activities, links), (2, 2, 1))
+        historical = dbx.files["/History/garmin_history_2011-01.json"]
+        current = dbx.files["/Current/garmin_2026-11.json"]
+        self.assertEqual(historical["activities"][0]["gear"]["gear_id"], 7)
+        self.assertIsNone(current["activities"][0]["gear"])
+        self.assertEqual(historical["health"], {"by_date": {"2011-01-01": {"steps": 10}}})
+        self.assertEqual(historical["profile"], {"keep": True})
+        self.assertEqual(historical["activities"][0]["detail"], {"keep": "unchanged"})
+        self.assertEqual(historical["metadata"]["export_status"], "complete")
+        self.assertEqual(historical["metadata"]["gear_link_count"], 1)
+        self.assertEqual(current["metadata"]["gear_link_count"], 0)
+
+    def test_gear_backfill_rejects_malformed_archive_before_writing(self):
+        class FakeDropbox:
+            def __init__(self):
+                self.uploaded = []
+            def files_list_folder(self, folder):
+                entries = ([SimpleNamespace(path_display=folder + "/garmin_history_2011-01.json",
+                                            name="garmin_history_2011-01.json")]
+                           if folder == ge.HISTORY_DIR else [])
+                return SimpleNamespace(entries=entries, has_more=False, cursor=None)
+            def files_download(self, path):
+                return None, SimpleNamespace(content=b'{"activities": "not-an-array", "metadata": {}}',
+                                              close=lambda: None)
+            def files_upload(self, *args, **kwargs):
+                self.uploaded.append(args[1])
+
+        dbx = FakeDropbox()
+        with self.assertRaises(RuntimeError):
+            ge.backfill_gear_in_dropbox(dbx, {7: {"name": "Brooks"}}, {})
+        self.assertEqual(dbx.uploaded, [])
 
 
 if __name__ == "__main__":
