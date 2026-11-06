@@ -1,6 +1,8 @@
 name: Garmin Data Export
 
 on:
+  pull_request:
+    branches: [garmin-complete-history-v2]
   workflow_dispatch:
   issues:
     types: [opened]
@@ -17,8 +19,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate Python syntax
+        run: python -m py_compile src/garmin_export.py
+
   export:
-    if: ${{ github.event_name != 'issues' || (github.event.action == 'opened' && github.event.issue.title == 'Starta Garmin-export') }}
+    if: ${{ github.event_name != 'pull_request' && (github.event_name != 'issues' || (github.event.action == 'opened' && github.event.issue.title == 'Starta Garmin-export')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
