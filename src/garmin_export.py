@@ -439,7 +439,8 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
         "source_status": {},
         "source_errors": errors,
         "devices": device_registry(activities),
-        "gear_registry": [{"gear_id": key, **value} for key, value in GEAR_REGISTRY.items()],
+        "gear_registry": [{"gear_id": key, **value}
+                          for key, value in (gear_registry or GEAR_REGISTRY).items()],
         "activities": activities,
         "daily": {"range_data": {}, "by_date": {},
                   "single_day_window": {"start_date": daily_start.isoformat(),
@@ -613,7 +614,8 @@ def annual_payload(year: int, rows: list[dict[str, Any]], profile: Any,
 
 def monthly_payload(month: str, rows: list[dict[str, Any]], profile: Any,
                     zones: Any, file_role: str,
-                    health: dict[str, Any] | None = None) -> dict[str, Any]:
+                    health: dict[str, Any] | None = None,
+                    gear_registry: dict[int, dict[str, Any]] | None = None) -> dict[str, Any]:
     ids = [activity_id(x.get("summary", {})) for x in rows]
     if None in ids or len(ids) != len(set(ids)):
         raise RuntimeError(f"Invalid or duplicate activity IDs in {month}")
@@ -667,10 +669,11 @@ def verify_monthly_history_file(dbx: dropbox.Dropbox, month: str,
 
 def save_monthly_history_file(dbx: dropbox.Dropbox, month: str,
                               rows: list[dict[str, Any]], profile: Any, zones: Any,
-                              health: dict[str, Any] | None = None) -> None:
+                              health: dict[str, Any] | None = None,
+                              gear_registry: dict[int, dict[str, Any]] | None = None) -> None:
     path = f"{HISTORY_DIR}/garmin_history_{month}.json"
     payload = monthly_payload(month, rows, profile, zones,
-                              "immutable_activity_history_monthly", health)
+                              "immutable_activity_history_monthly", health, gear_registry)
     mode = WriteMode.add
     if dropbox_file_exists(dbx, path):
         existing = read_dropbox(dbx, path) or {}
@@ -681,6 +684,7 @@ def save_monthly_history_file(dbx: dropbox.Dropbox, month: str,
         old_health = existing.get("health", {})
         old_health_meta = old_health.get("metadata", {}) if isinstance(old_health, dict) else {}
         if (existing.get("metadata", {}).get("export_status") == "complete"
+                and isinstance(old_health, dict)
                 and isinstance(old_health.get("by_date"), dict)
                 and old_health_meta.get("history_scope")):
             return
@@ -820,7 +824,7 @@ def main() -> None:
         payload = monthly_payload(
             month, month_rows, profile if p_ok else None, zones if z_ok else None,
             "current_month" if is_current else "immutable_activity_history_monthly",
-            health)
+            health, gear_registry)
         payload["metadata"]["export_status"] = (
             "complete" if not month_errors else "partial")
         payload["metadata"]["source_error_count"] = len(month_errors)
@@ -832,7 +836,7 @@ def main() -> None:
         else:
             save_monthly_history_file(dbx, month, month_rows,
                                       profile if p_ok else None,
-                                      zones if z_ok else None, health)
+                                      zones if z_ok else None, health, gear_registry)
         if month_errors:
             raise RuntimeError(
                 f"MONTH {month}: export is partial ({len(month_errors)} source errors); "
