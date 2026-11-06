@@ -75,12 +75,30 @@ def fetch_gear_data(cli: GarminCLI) -> tuple[dict[int, dict[str, Any]], dict[str
     with PersonalApiAuthenticator() as auth:
         token = auth.obtain_token(api_key)
         with GarminPersonalApiClient(token.access_token) as client:
-            gear_rows = client.get(
+            gear_response = client.get(
                 "/gear-service/gear/filterGear",
                 params={"userProfilePk": str(profile_id)},
             )
-            if not isinstance(gear_rows, list):
+
+            # Garmin returns a wrapper containing both the gear registry and
+            # the activity links. The export format is typically a one-item
+            # list: [{"gearDTOS": [...], "gearActivityDTOs": {...}}].
+            payload = gear_response
+            if isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], dict):
+                payload = payload[0]
+            if isinstance(payload, dict):
+                gear_rows = payload.get("gearDTOS", [])
+                gear_activity_rows = payload.get("gearActivityDTOs", {})
+            elif isinstance(payload, list):
+                # Keep compatibility with responses containing gear rows only.
+                gear_rows = payload
+                gear_activity_rows = {}
+            else:
                 raise RuntimeError("Garmin gear endpoint returned an unexpected response")
+
+            if not isinstance(gear_rows, list) or not isinstance(gear_activity_rows, dict):
+                raise RuntimeError("Garmin gear endpoint returned an invalid gear payload")
+
             registry: dict[int, dict[str, Any]] = {}
             activity_to_gear: dict[str, int] = {}
             for item in gear_rows:
@@ -88,14 +106,26 @@ def fetch_gear_data(cli: GarminCLI) -> tuple[dict[int, dict[str, Any]], dict[str
                     continue
                 gear_id = int(item["gearPk"])
                 registry[gear_id] = item
-                gear_uuid = item.get("uuid")
-                if not gear_uuid:
+
+            # gearActivityDTOs is keyed by gearPk and contains activityId rows.
+            # Do not call the old UUID-based endpoint: it returned 404 and is
+            # unnecessary when Garmin supplies the complete mapping here.
+            for gear_key, links in gear_activity_rows.items():
+                if not isinstance(links, list):
                     continue
-                linked = client.get(f"/activitylist-service/activities/{gear_uuid}/gear")
-                if isinstance(linked, list):
-                    for link in linked:
-                        if isinstance(link, dict) and link.get("activityId") is not None:
-                            activity_to_gear[str(link["activityId"])] = gear_id
+                try:
+                    gear_id = int(gear_key)
+                except (TypeError, ValueError):
+                    continue
+                for link in links:
+                    if not isinstance(link, dict) or link.get("activityId") is None:
+                        continue
+                    link_gear_id = link.get("gearPk", gear_id)
+                    try:
+                        link_gear_id = int(link_gear_id)
+                    except (TypeError, ValueError):
+                        continue
+                    activity_to_gear[str(link["activityId"])] = link_gear_id
     LOG.info("Fetched %d gear items and %d activity-to-gear links",
              len(registry), len(activity_to_gear))
     return registry, activity_to_gear
