@@ -498,6 +498,40 @@ def ensure_dropbox_folders(dbx: dropbox.Dropbox) -> None:
             raise RuntimeError(f"Expected a Dropbox folder at {path}")
 
 
+def fetch_month_health(cli: GarminCLI, month: str) -> dict[str, Any]:
+    """Fetch all supported date-range health sources for one historical month."""
+    start, end = month_bounds(month)
+    errors: list[dict[str, str]] = []
+    data: dict[str, Any] = {"range_data": {}, "source_errors": errors}
+    sources = {
+        "stress": "stress",
+        "steps": "steps",
+        "weight_measurements": "weight-measurements",
+        "weight_goals": "effective-weight-goals",
+        "sleep_summaries": "sleep-summaries",
+        "body_battery": "body-battery",
+        "daily_summaries": "daily-summaries",
+        "hrv_summaries": "hrv-summaries",
+        "wellness_activity_summaries": "wellness-activity-summaries",
+    }
+    for field, command in sources.items():
+        ok, value = optional(cli, errors, f"{command} {month}", command,
+                             "--start-date", start, "--end-date", end)
+        data["range_data"][field] = (
+            enrich_device_ids(date_index(value)) if ok and value is not None
+            else {"raw": None, "by_date": {}})
+    # Fitness Age is a single-date endpoint; retain the month's final available day.
+    age_date = min(date.fromisoformat(end), datetime.now(TZ).date()).isoformat()
+    ok, value = optional(cli, errors, f"fitness-age {age_date}",
+                         "fitness-age", "--date", age_date)
+    data["fitness_age"] = enrich_device_ids(value) if ok else None
+    data["metadata"] = {
+        "month": month, "source_error_count": len(errors),
+        "export_status": "complete" if not errors else "partial",
+    }
+    return data
+
+
 def activity_datetime(row: dict[str, Any]) -> datetime:
     summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
     detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
@@ -561,7 +595,8 @@ def annual_payload(year: int, rows: list[dict[str, Any]], profile: Any,
 
 
 def monthly_payload(month: str, rows: list[dict[str, Any]], profile: Any,
-                    zones: Any, file_role: str) -> dict[str, Any]:
+                    zones: Any, file_role: str,
+                    health: dict[str, Any] | None = None) -> dict[str, Any]:
     ids = [activity_id(x.get("summary", {})) for x in rows]
     if None in ids or len(ids) != len(set(ids)):
         raise RuntimeError(f"Invalid or duplicate activity IDs in {month}")
@@ -573,7 +608,10 @@ def monthly_payload(month: str, rows: list[dict[str, Any]], profile: Any,
                      "source": "Garmin Connect", "month": month},
         "period": {"start_date": start, "end_date": end},
         "profile": profile, "heart_rate_zones": zones,
-        "devices": device_registry(rows), "activities": rows,
+        "devices": device_registry(rows),
+        "gear_registry": [{"gear_id": key, **value} for key, value in GEAR_REGISTRY.items()],
+        "activities": rows,
+        "health": health or {},
     }
 
 
@@ -599,9 +637,11 @@ def verify_monthly_history_file(dbx: dropbox.Dropbox, month: str,
 
 
 def save_monthly_history_file(dbx: dropbox.Dropbox, month: str,
-                              rows: list[dict[str, Any]], profile: Any, zones: Any) -> None:
+                              rows: list[dict[str, Any]], profile: Any, zones: Any,
+                              health: dict[str, Any] | None = None) -> None:
     path = f"{HISTORY_DIR}/garmin_history_{month}.json"
-    payload = monthly_payload(month, rows, profile, zones, "immutable_activity_history_monthly")
+    payload = monthly_payload(month, rows, profile, zones,
+                              "immutable_activity_history_monthly", health)
     if dropbox_file_exists(dbx, path):
         existing = read_dropbox(dbx, path) or {}
         old_ids = {activity_id(x.get("summary", {})) for x in existing.get("activities", [])
@@ -714,8 +754,10 @@ def main() -> None:
                 errors: list[dict[str, str]] = []
                 p_ok, profile = optional(cli, errors, f"profile-settings {month}", "profile-settings")
                 z_ok, zones = optional(cli, errors, f"heart-rate-zones {month}", "heart-rate-zones")
+                health = fetch_month_health(cli, month)
                 save_monthly_history_file(dbx, month, month_rows,
-                                          profile if p_ok else None, zones if z_ok else None)
+                                          profile if p_ok else None, zones if z_ok else None,
+                                          health)
             continue
 
         if verify_existing_annual_file(dbx, year, summaries):
