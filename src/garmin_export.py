@@ -683,9 +683,11 @@ def optional_daily(cli: GarminCLI, unavailable: list[dict[str, str]],
             raise
 
 
-def fetch_month_health(cli: GarminCLI, month: str) -> dict[str, Any]:
-    """Fetch all supported date-range health sources for one historical month."""
-    start, end = month_bounds(month)
+def fetch_month_health(cli: GarminCLI, month: str,
+                      today: date | None = None) -> dict[str, Any]:
+    """Fetch health data for a month, never requesting dates later than today."""
+    start, month_end = month_bounds(month)
+    end = min(date.fromisoformat(month_end), today or datetime.now(TZ).date()).isoformat()
     errors: list[dict[str, str]] = []
     unavailable: list[dict[str, str]] = []
     data: dict[str, Any] = {"range_data": {}, "source_errors": errors,
