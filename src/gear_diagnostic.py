@@ -8,6 +8,8 @@ import os
 import time
 from datetime import date
 from typing import Any
+
+import requests
 from urllib.parse import urlencode
 
 from garmin_personal_api.api_keys import resolve_api_key
@@ -100,6 +102,37 @@ def main() -> None:
     api_key = resolve_api_key()
     with PersonalApiAuthenticator() as auth:
         token = auth.obtain_token(api_key)
+
+        # The Personal API host returned 404 for every gear route. Probe Garmin's
+        # regular Connect hosts with the same bearer token, read-only, before
+        # concluding that gear requires a different authentication flow.
+        headers = {
+            "Authorization": f"Bearer {token.access_token}",
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0",
+            "Origin": "https://connect.garmin.com",
+            "Referer": "https://connect.garmin.com/modern/",
+            "DI-Backend": "connectapi.garmin.com",
+        }
+        probes = [
+            ("legacy gear list", "/gear-service/gear/filterGear",
+             {"userProfilePk": profile_id}),
+            ("v2 gear list", "/gear-service/gear/v2/list",
+             {"start": 0, "limit": 100}),
+        ]
+        for host in ("https://connect.garmin.com", "https://connectapi.garmin.com"):
+            for label, path, params in probes:
+                try:
+                    response = requests.get(
+                        host + path, headers=headers, params=params,
+                        timeout=20, allow_redirects=False)
+                    LOG.info("HOST PROBE %s %s: HTTP %d; content_type=%s; body=%s",
+                             host, label, response.status_code,
+                             response.headers.get("Content-Type"),
+                             response.text[:350].replace("\\n", " "))
+                except Exception as exc:
+                    LOG.warning("HOST PROBE %s %s FAILED: %s", host, label, str(exc)[:300])
+
         with GarminPersonalApiClient(token.access_token) as client:
             legacy_gears = try_get(
                 client, "gear list legacy filterGear",
