@@ -42,6 +42,23 @@ class ExportHelperTests(unittest.TestCase):
         row = ge.enrich_device_ids({"detail": {"deviceId": 999999}})
         self.assertIsNone(row["detail"]["device_model"])
 
+    def test_month_health_clamps_range_to_today(self):
+        class RecordingCLI:
+            def __init__(self):
+                self.calls = []
+            def run(self, label, *args):
+                self.calls.append((label, args))
+                return []
+
+        cli = RecordingCLI()
+        result = ge.fetch_month_health(cli, "2026-11", today=ge.date(2026, 11, 7))
+
+        for source in ("stress", "steps"):
+            call = next(args for label, args in cli.calls if label == f"{source} 2026-11")
+            self.assertEqual(call[call.index("--start-date") + 1], "2026-11-01")
+            self.assertEqual(call[call.index("--end-date") + 1], "2026-11-07")
+        self.assertEqual(len(result["by_date"]), 7)
+
 
     def test_gear_only_backfill_preserves_non_gear_data(self):
         class FakeResponse:
