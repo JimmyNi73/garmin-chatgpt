@@ -71,6 +71,8 @@ class ExportHelperTests(unittest.TestCase):
                 self.calls = []
             def run(self, label, *args):
                 self.calls.append((label, args))
+                if "--start-date" not in args:
+                    return None
                 start = args[args.index("--start-date") + 1]
                 end = args[args.index("--end-date") + 1]
                 return [{"calendarDate": start, "value": 11},
