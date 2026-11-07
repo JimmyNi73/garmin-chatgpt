@@ -55,9 +55,9 @@ class ExportHelperTests(unittest.TestCase):
 
         for source in ("stress", "steps"):
             call = next(args for label, args in cli.calls if label == f"{source} 2026-11")
-            self.assertEqual(call[call.index("--start-date") + 1], "2026-11-01")
+            self.assertEqual(call[call.index("--start-date") + 1], "2026-10-09")
             self.assertEqual(call[call.index("--end-date") + 1], "2026-11-07")
-        self.assertEqual(len(result["by_date"]), 7)
+        self.assertEqual(len(result["by_date"]), 30)
 
 
     def test_gear_only_backfill_preserves_non_gear_data(self):
