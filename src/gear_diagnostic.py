@@ -16,6 +16,7 @@ from garmin_personal_api.api_keys import resolve_api_key
 from garmin_personal_api.auth import PersonalApiAuthenticator
 from garmin_personal_api.client import GarminPersonalApiClient
 
+import dropbox
 from dropbox.files import WriteMode
 
 from garmin_export import (
@@ -232,7 +233,7 @@ def main() -> None:
     dbx = dbx_client()
     dbx.users_get_current_account()
     folder = dbx.files_get_metadata("/Test")
-    if not hasattr(folder, "path_lower"):
+    if not isinstance(folder, dropbox.files.FolderMetadata):
         raise RuntimeError("Dropbox /Test path is not a folder; refusing upload")
     output_path = f"/Test/garmin_test_{month}.json"
     data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\\n"
