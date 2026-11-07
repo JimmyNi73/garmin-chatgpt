@@ -716,16 +716,44 @@ def fetch_month_health(cli: GarminCLI, month: str,
     }
     for field, command in sources.items():
         label = f"{command} {month}"
-        args = (command, "--start-date", start, "--end-date", end)
         if field in ("stress", "steps"):
-            ok, value = optional_range(cli, errors, unavailable, label, *args)
+            # Garmin rejects date ranges that cross a calendar-month boundary.
+            # Query each calendar month separately, then merge the date-indexed rows.
+            merged_by_date: dict[str, Any] = {}
+            raw_parts: list[Any] = []
+            successful_parts = 0
+            unavailable_parts = 0
+            cursor = start_date
+            while cursor <= end_date:
+                _, segment_end_text = month_bounds(cursor.strftime("%Y-%m"))
+                segment_end = min(date.fromisoformat(segment_end_text), end_date)
+                segment_label = f"{command} {cursor.strftime('%Y-%m')}"
+                ok, value = optional_range(
+                    cli, errors, unavailable, segment_label,
+                    command, "--start-date", cursor.isoformat(),
+                    "--end-date", segment_end.isoformat())
+                if ok and value is not None:
+                    indexed = date_index(value)
+                    merged_by_date.update(indexed["by_date"])
+                    raw_parts.append(value)
+                    successful_parts += 1
+                elif any(item["source"] == segment_label for item in unavailable):
+                    unavailable_parts += 1
+                cursor = segment_end + timedelta(days=1)
+            result = {"raw": raw_parts, "by_date": merged_by_date}
+            if unavailable_parts and successful_parts:
+                result["availability"] = "partial"
+            elif unavailable_parts:
+                result["availability"] = "unavailable"
+            elif not merged_by_date:
+                result["availability"] = "no_data"
+            data["range_data"][field] = enrich_device_ids(result)
         else:
+            args = (command, "--start-date", start, "--end-date", end)
             ok, value = optional(cli, errors, label, *args)
-        data["range_data"][field] = (
-            enrich_device_ids(date_index(value)) if ok and value is not None
-            else {"raw": None, "by_date": {},
-                  "availability": "unavailable" if any(
-                      item["source"] == label for item in unavailable) else "no_data"})
+            data["range_data"][field] = (
+                enrich_device_ids(date_index(value)) if ok and value is not None
+                else {"raw": None, "by_date": {}, "availability": "no_data"})
     # Daily endpoints must be queried per date. Fetch every calendar day in the
     # archive month; an empty response is a normal data gap, not an export failure.
     data["by_date"] = {}
