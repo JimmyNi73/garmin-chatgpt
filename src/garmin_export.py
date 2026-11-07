@@ -686,8 +686,19 @@ def optional_daily(cli: GarminCLI, unavailable: list[dict[str, str]],
 def fetch_month_health(cli: GarminCLI, month: str,
                       today: date | None = None) -> dict[str, Any]:
     """Fetch health data for a month, never requesting dates later than today."""
-    start, month_end = month_bounds(month)
-    end = min(date.fromisoformat(month_end), today or datetime.now(TZ).date()).isoformat()
+    month_start, month_end = month_bounds(month)
+    run_date = today or datetime.now(TZ).date()
+    end_date = min(date.fromisoformat(month_end), run_date)
+    if month == run_date.strftime("%Y-%m"):
+        # Current health snapshot: inclusive 30-day window, always ending today.
+        start_date = run_date - timedelta(days=29)
+        history_scope = "rolling_30_days"
+    else:
+        # Historical recovery keeps the original complete-month behavior.
+        start_date = date.fromisoformat(month_start)
+        history_scope = "full_month_all_available_dates"
+    start = start_date.isoformat()
+    end = end_date.isoformat()
     errors: list[dict[str, str]] = []
     unavailable: list[dict[str, str]] = []
     data: dict[str, Any] = {"range_data": {}, "source_errors": errors,
@@ -718,8 +729,8 @@ def fetch_month_health(cli: GarminCLI, month: str,
     # Daily endpoints must be queried per date. Fetch every calendar day in the
     # archive month; an empty response is a normal data gap, not an export failure.
     data["by_date"] = {}
-    first = date.fromisoformat(start)
-    last = min(date.fromisoformat(end), datetime.now(TZ).date())
+    first = start_date
+    last = end_date
     for offset in range((last - first).days + 1):
         day = (first + timedelta(days=offset)).isoformat()
         daily_row: dict[str, Any] = {}
@@ -734,7 +745,10 @@ def fetch_month_health(cli: GarminCLI, month: str,
         "unavailable_source_count": len(unavailable),
         "export_status": "complete" if not errors else "partial",
         "daily_detail_dates_queried": len(data["by_date"]),
-        "history_scope": "full_month_all_available_dates",
+        "start_date": start,
+        "end_date": end,
+        "window_days": (end_date - start_date).days + 1,
+        "history_scope": history_scope,
     }
     return data
 
@@ -967,17 +981,24 @@ def main() -> None:
     # run performs only a gear-field backfill and exits before activity indexes,
     # activity details, or health history are fetched.
     gear_only_backfill = os.getenv("GARMIN_GEAR_BACKFILL_ONLY", "").lower() == "true"
+    gear_available = True
     try:
         gear_registry, activity_to_gear = fetch_gear_data(cli)
     except Exception:
-        if gear_only_backfill:
-            raise
-        LOG.exception("Gear registry unavailable; continuing normal export without gear links")
+        gear_available = False
+        LOG.exception("Gear registry unavailable; continuing export without changing existing gear data")
         gear_registry, activity_to_gear = {}, {}
     GEAR_REGISTRY.update(gear_registry)
 
     if gear_only_backfill:
-        backfill_gear_in_dropbox(dbx, gear_registry, activity_to_gear)
+        if not gear_available:
+            LOG.warning("Gear-only backfill skipped because Garmin gear data is unavailable.")
+            return
+        try:
+            backfill_gear_in_dropbox(dbx, gear_registry, activity_to_gear)
+        except Exception:
+            LOG.exception("Gear-only backfill failed; skipping gear update.")
+            return
         LOG.info("Gear-only backfill completed. No activity details or health history were downloaded.")
         return
 
@@ -1051,7 +1072,18 @@ def main() -> None:
         if existing_valid:
             # Re-fetch only activity details inside the rolling 30-day window.
             refreshed_rows = activity_records(cli, recent_summaries) if recent_summaries else []
-            enrich_gear_records(refreshed_rows, gear_registry, activity_to_gear)
+            if gear_available:
+                enrich_gear_records(refreshed_rows, gear_registry, activity_to_gear)
+            else:
+                old_rows_by_id = {
+                    activity_id(row.get("summary", {})): row for row in existing_rows
+                    if isinstance(row, dict)
+                }
+                for row in refreshed_rows:
+                    aid = activity_id(row.get("summary", {}))
+                    old_row = old_rows_by_id.get(aid)
+                    if old_row is not None and "gear" in old_row:
+                        row["gear"] = old_row["gear"]
             refreshed_ids = [activity_id(row.get("summary", {})) for row in refreshed_rows]
             expected_recent_ids = [activity_id(summary) for summary in recent_summaries]
             if (len(refreshed_ids) != len(expected_recent_ids)
@@ -1075,17 +1107,21 @@ def main() -> None:
                 activity_id(row.get("summary", {})): row.get("gear")
                 for row in existing_rows
             }
-            enrich_gear_records(month_rows, gear_registry, activity_to_gear)
-            new_gear_by_id = {
-                activity_id(row.get("summary", {})): row.get("gear")
-                for row in month_rows
-            }
-            gear_links_changed = old_gear_by_id != new_gear_by_id
-            new_gear_registry = [
-                {"gear_id": key, **value}
-                for key, value in sorted(gear_registry.items())
-            ]
-            gear_registry_changed = existing.get("gear_registry", []) != new_gear_registry
+            if gear_available:
+                enrich_gear_records(month_rows, gear_registry, activity_to_gear)
+                new_gear_by_id = {
+                    activity_id(row.get("summary", {})): row.get("gear")
+                    for row in month_rows
+                }
+                gear_links_changed = old_gear_by_id != new_gear_by_id
+                new_gear_registry = [
+                    {"gear_id": key, **value}
+                    for key, value in sorted(gear_registry.items())
+                ]
+                gear_registry_changed = existing.get("gear_registry", []) != new_gear_registry
+            else:
+                gear_links_changed = False
+                gear_registry_changed = False
 
             if not is_current:
                 # Preserve health history and avoid rewriting unchanged old months.
@@ -1093,7 +1129,11 @@ def main() -> None:
                     save_monthly_history_file(
                         dbx, month, month_rows, existing.get("profile"),
                         existing.get("heart_rate_zones"), existing.get("health"),
-                        gear_registry, force_refresh=True,
+                        (gear_registry if gear_available else {
+                            int(item["gear_id"]): {k: v for k, v in item.items() if k != "gear_id"}
+                            for item in existing.get("gear_registry", [])
+                            if isinstance(item, dict) and item.get("gear_id") is not None
+                        }), force_refresh=True,
                     )
                     LOG.info(
                         "MONTH %s: refreshed %d recent activities; gear links changed=%s; "
@@ -1108,7 +1148,17 @@ def main() -> None:
         else:
             # Missing/incomplete files retain the original full-month recovery path.
             month_rows = activity_records(cli, month_summaries) if month_summaries else []
-            enrich_gear_records(month_rows, gear_registry, activity_to_gear)
+            if gear_available:
+                enrich_gear_records(month_rows, gear_registry, activity_to_gear)
+            elif isinstance(existing_rows, list):
+                old_rows_by_id = {
+                    activity_id(row.get("summary", {})): row for row in existing_rows
+                    if isinstance(row, dict)
+                }
+                for row in month_rows:
+                    old_row = old_rows_by_id.get(activity_id(row.get("summary", {})))
+                    if old_row is not None and "gear" in old_row:
+                        row["gear"] = old_row["gear"]
 
         got = [activity_id(row.get("summary", {})) for row in month_rows]
         expected = [activity_id(row) for row in month_summaries]
@@ -1128,7 +1178,11 @@ def main() -> None:
         payload = monthly_payload(
             month, month_rows, profile if p_ok else None, zones if z_ok else None,
             "current_month" if is_current else "immutable_activity_history_monthly",
-            health, gear_registry)
+            health, (gear_registry if gear_available else {
+                int(item["gear_id"]): {k: v for k, v in item.items() if k != "gear_id"}
+                for item in (existing or {}).get("gear_registry", [])
+                if isinstance(item, dict) and item.get("gear_id") is not None
+            }))
         payload["metadata"]["export_status"] = (
             "complete" if not month_errors else "partial")
         payload["metadata"]["source_error_count"] = len(month_errors)
