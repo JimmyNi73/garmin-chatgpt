@@ -16,7 +16,12 @@ from garmin_personal_api.api_keys import resolve_api_key
 from garmin_personal_api.auth import PersonalApiAuthenticator
 from garmin_personal_api.client import GarminPersonalApiClient
 
-from garmin_export import GarminCLI, fetch_activities
+from dropbox.files import WriteMode
+
+from garmin_export import (
+    GarminCLI, fetch_activities, activity_records, fetch_month_health,
+    monthly_payload, optional, dbx_client, enrich_gear_records,
+)
 
 LOG = logging.getLogger("gear_diagnostic")
 
@@ -193,7 +198,53 @@ def main() -> None:
     LOG.info("legacy_activity_gear_successes=%d/%d", len(legacy_linked), len(activity_ids))
     LOG.info("v2_activity_gear_successes=%d/%d", len(v2_linked), len(activity_ids))
     LOG.info("reverse_gear_lookup_matches=%s", json.dumps(reverse_matches, ensure_ascii=False))
-    LOG.info("No Dropbox client was created; no files were changed.")
+    # Create a complete standalone monthly export in /Test. WriteMode.add is
+    # atomic and refuses to overwrite an existing file with the same name.
+    LOG.info("Fetching activity details and monthly health data for test export.")
+    rows = activity_records(cli, activities)
+    enrich_gear_records(rows, {}, {})
+    errors: list[dict[str, str]] = []
+    profile_ok, profile = optional(cli, errors, "profile-settings test export", "profile-settings")
+    zones_ok, zones = optional(cli, errors, "heart-rate-zones test export", "heart-rate-zones")
+    health = fetch_month_health(cli, month)
+    health_errors = errors + health.get("source_errors", [])
+    health.setdefault("metadata", {})["export_status"] = (
+        "complete" if not health_errors else "partial")
+    health["metadata"]["source_error_count"] = len(health_errors)
+
+    payload = monthly_payload(
+        month, rows, profile if profile_ok else None,
+        zones if zones_ok else None, "standalone_test_export",
+        health, {},
+    )
+    payload["metadata"]["export_status"] = (
+        "complete" if not health_errors else "partial")
+    payload["metadata"]["source_error_count"] = len(health_errors)
+    payload["metadata"]["test_export"] = True
+    payload["metadata"]["gear_diagnostic"] = {
+        "legacy_gear_list": isinstance(legacy_gears, list),
+        "v2_gear_list": v2_gears is not None,
+        "legacy_activity_gear_successes": len(legacy_linked),
+        "v2_activity_gear_successes": len(v2_linked),
+        "gear_link_count": sum(1 for row in rows if isinstance(row.get("gear"), dict)),
+    }
+
+    dbx = dbx_client()
+    dbx.users_get_current_account()
+    folder = dbx.files_get_metadata("/Test")
+    if not hasattr(folder, "path_lower"):
+        raise RuntimeError("Dropbox /Test path is not a folder; refusing upload")
+    output_path = f"/Test/garmin_test_{month}.json"
+    data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\\n"
+    try:
+        dbx.files_upload(data, output_path, mode=WriteMode.add, mute=True)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not create {output_path}; existing files are never overwritten: {exc}"
+        ) from exc
+    LOG.info("TEST EXPORT CREATED: %s (%d activities, %d bytes, status=%s)",
+             output_path, len(rows), len(data), payload["metadata"]["export_status"])
+    LOG.info("Test export is isolated; /Current and /History were not accessed or modified.")
 
 
 if __name__ == "__main__":
