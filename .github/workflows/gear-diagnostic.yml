@@ -24,9 +24,12 @@ jobs:
       - name: Install Garmin client
         run: python -m pip install --upgrade garmin-connect-personal-api-python dropbox
 
-      - name: Run read-only one-month gear diagnostic
+      - name: Export one-month test file to Dropbox Test folder
         env:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
           GARMIN_REQUEST_PAUSE_SECONDS: "0.25"
           GARMIN_BATCH_PAUSE_SECONDS: "0"
           GARMIN_MAX_RETRIES: "2"
