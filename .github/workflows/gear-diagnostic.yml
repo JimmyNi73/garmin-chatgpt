@@ -24,6 +24,11 @@ jobs:
       - name: Install Garmin client
         run: python -m pip install --upgrade garmin-connect-personal-api-python dropbox
 
+      - name: Validate Python syntax and exporter tests
+        run: |
+          python -m py_compile src/garmin_export.py src/gear_diagnostic.py
+          python -m unittest discover -s tests -v
+
       - name: Export one-month test file to Dropbox Test folder
         env:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
