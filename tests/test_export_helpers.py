@@ -54,10 +54,36 @@ class ExportHelperTests(unittest.TestCase):
         result = ge.fetch_month_health(cli, "2026-11", today=ge.date(2026, 11, 7))
 
         for source in ("stress", "steps"):
-            call = next(args for label, args in cli.calls if label == f"{source} 2026-11")
-            self.assertEqual(call[call.index("--start-date") + 1], "2026-10-09")
-            self.assertEqual(call[call.index("--end-date") + 1], "2026-11-07")
+            calls = [(label, args) for label, args in cli.calls
+                     if label.startswith(source + " ")]
+            self.assertEqual(len(calls), 2)
+            ranges = []
+            for label, args in calls:
+                ranges.append((args[args.index("--start-date") + 1],
+                               args[args.index("--end-date") + 1]))
+            self.assertEqual(ranges, [("2026-10-09", "2026-10-31"),
+                                      ("2026-11-01", "2026-11-07")])
         self.assertEqual(len(result["by_date"]), 30)
+
+    def test_stress_and_steps_merge_month_segments(self):
+        class SegmentCLI:
+            def __init__(self):
+                self.calls = []
+            def run(self, label, *args):
+                self.calls.append((label, args))
+                start = args[args.index("--start-date") + 1]
+                end = args[args.index("--end-date") + 1]
+                return [{"calendarDate": start, "value": 11},
+                        {"calendarDate": end, "value": 22}]
+
+        cli = SegmentCLI()
+        result = ge.fetch_month_health(cli, "2026-11", today=ge.date(2026, 11, 7))
+        for field in ("stress", "steps"):
+            indexed = result["range_data"][field]["by_date"]
+            self.assertEqual(indexed["2026-10-09"]["value"], 11)
+            self.assertEqual(indexed["2026-10-31"]["value"], 22)
+            self.assertEqual(indexed["2026-11-01"]["value"], 11)
+            self.assertEqual(indexed["2026-11-07"]["value"], 22)
 
 
     def test_gear_only_backfill_preserves_non_gear_data(self):
