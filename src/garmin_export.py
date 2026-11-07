@@ -984,6 +984,10 @@ def main() -> None:
     gear_available = True
     try:
         gear_registry, activity_to_gear = fetch_gear_data(cli)
+        if not gear_registry:
+            gear_available = False
+            LOG.warning("Garmin returned no gear registry; continuing without changing existing gear data")
+            gear_registry, activity_to_gear = {}, {}
     except Exception:
         gear_available = False
         LOG.exception("Gear registry unavailable; continuing export without changing existing gear data")
@@ -1186,7 +1190,8 @@ def main() -> None:
         payload["metadata"]["export_status"] = (
             "complete" if not month_errors else "partial")
         payload["metadata"]["source_error_count"] = len(month_errors)
-        payload["metadata"]["history_scope"] = "full_month_all_available_dates"
+        payload["metadata"]["history_scope"] = health.get("metadata", {}).get(
+            "history_scope", "full_month_all_available_dates")
         payload["metadata"]["gear_link_count"] = sum(
             1 for row in month_rows if isinstance(row.get("gear"), dict))
         if is_current:
