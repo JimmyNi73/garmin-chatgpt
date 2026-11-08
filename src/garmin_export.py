@@ -219,23 +219,6 @@ def device_registry(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [devices[key] for key in sorted(devices)]
 
 
-def due_schedule_slots(now: datetime | None = None) -> list[str]:
-    """Return uncompleted target-slot IDs that are due and no more than five hours late."""
-    local = (now or datetime.now(TZ)).astimezone(TZ)
-    slots: list[tuple[datetime, str]] = []
-    for day in (local.date() - timedelta(days=1), local.date()):
-        for hour in (8, 14, 16, 20, 22):
-            scheduled = datetime.combine(day, datetime.min.time(), tzinfo=TZ).replace(hour=hour)
-            age = local - scheduled
-            if timedelta(0) <= age <= timedelta(hours=5):
-                slots.append((scheduled, scheduled.strftime("%Y-%m-%d-%H")))
-    return [slot_id for _, slot_id in sorted(slots)]
-
-
-def schedule_marker_path(slot_id: str) -> str:
-    return f"{CURRENT_DIR}/.schedule-{slot_id}.json"
-
-
 def retry_after(stderr: str) -> int | None:
     m = re.search(r'"retryInSeconds"\s*:\s*(\d+)', stderr or "")
     if m:
@@ -1009,16 +992,8 @@ def main() -> None:
     LOG.info("Dropbox authentication OK.")
     ensure_dropbox_folders(dbx)
 
-    schedule_slot: str | None = None
     if os.getenv("GITHUB_EVENT_NAME") == "schedule":
-        for candidate in due_schedule_slots():
-            if not dropbox_file_exists(dbx, schedule_marker_path(candidate)):
-                schedule_slot = candidate
-                break
-        if schedule_slot is None:
-            LOG.info("No uncompleted Stockholm schedule slot is due; skipping export.")
-            return
-        LOG.info("Starting scheduled export for Stockholm slot %s.", schedule_slot)
+        LOG.info("Starting Garmin export from GitHub Actions schedule trigger.")
 
     today = datetime.now(TZ).date()
     current_month = today.strftime("%Y-%m")
@@ -1259,21 +1234,6 @@ def main() -> None:
              len(completed), first_month, current_month,
              sum(len(rows) for rows in summaries_by_month.values()),
              len(activity_to_gear), cli.request_count)
-
-    if schedule_slot is not None:
-        marker = {
-            "slot": schedule_slot,
-            "completed_at": datetime.now(TZ).isoformat(),
-            "status": "completed",
-        }
-        dbx.files_upload(
-            json.dumps(marker, ensure_ascii=False).encode("utf-8"),
-            schedule_marker_path(schedule_slot),
-            mode=WriteMode.add,
-            mute=True,
-        )
-        LOG.info("Marked Stockholm schedule slot %s as completed.", schedule_slot)
-
 
 if __name__ == "__main__":
     try:
