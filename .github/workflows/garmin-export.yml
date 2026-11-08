@@ -5,16 +5,9 @@ on:
   issues:
     types: [opened]
   schedule:
-    # GitHub owns the schedule; use Stockholm local time and avoid the top of the hour.
-    - cron: "7 8 * * *"
-      timezone: "Europe/Stockholm"
-    - cron: "7 14 * * *"
-      timezone: "Europe/Stockholm"
-    - cron: "7 16 * * *"
-      timezone: "Europe/Stockholm"
-    - cron: "7 20 * * *"
-      timezone: "Europe/Stockholm"
-    - cron: "7 22 * * *"
+    # Run at 06:07, 08:07, 14:07, 20:07 and 22:07 Stockholm time.
+    # GitHub handles CET/CEST automatically.
+    - cron: "7 6,8,14,20,22 * * *"
       timezone: "Europe/Stockholm"
 
 permissions:
