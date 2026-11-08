@@ -15,6 +15,17 @@ class FakeCLI:
 
 
 class ExportHelperTests(unittest.TestCase):
+    def test_schedule_catches_up_oldest_due_slot_first(self):
+        now = ge.datetime(2026, 11, 8, 8, 30, tzinfo=ge.TZ)
+        self.assertEqual(
+            ge.due_schedule_slots(now),
+            ["2026-11-08-06", "2026-11-08-08"],
+        )
+
+    def test_schedule_ignores_slots_more_than_five_hours_late(self):
+        now = ge.datetime(2026, 11, 8, 11, 1, tzinfo=ge.TZ)
+        self.assertEqual(ge.due_schedule_slots(now), ["2026-11-08-08"])
+
     def test_fenix6_device_override(self):
         row = ge.enrich_device_ids({
             "summary": {"activityId": 123, "deviceId": 3359313181}
