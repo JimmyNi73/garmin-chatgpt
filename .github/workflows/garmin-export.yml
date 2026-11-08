@@ -5,8 +5,17 @@ on:
   issues:
     types: [opened]
   schedule:
-    # Hourly catch-up checks; Python runs each Stockholm target slot once, even if GitHub is late.
-    - cron: "0 * * * *"
+    # GitHub owns the schedule; use Stockholm local time and avoid the top of the hour.
+    - cron: "7 8 * * *"
+      timezone: "Europe/Stockholm"
+    - cron: "7 14 * * *"
+      timezone: "Europe/Stockholm"
+    - cron: "7 16 * * *"
+      timezone: "Europe/Stockholm"
+    - cron: "7 20 * * *"
+      timezone: "Europe/Stockholm"
+    - cron: "7 22 * * *"
+      timezone: "Europe/Stockholm"
 
 permissions:
   contents: read
