@@ -224,7 +224,7 @@ def due_schedule_slots(now: datetime | None = None) -> list[str]:
     local = (now or datetime.now(TZ)).astimezone(TZ)
     slots: list[tuple[datetime, str]] = []
     for day in (local.date() - timedelta(days=1), local.date()):
-        for hour in (6, 8, 14, 20, 22):
+        for hour in (8, 14, 16, 20, 22):
             scheduled = datetime.combine(day, datetime.min.time(), tzinfo=TZ).replace(hour=hour)
             age = local - scheduled
             if timedelta(0) <= age <= timedelta(hours=5):
