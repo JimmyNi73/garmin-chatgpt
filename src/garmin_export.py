@@ -448,7 +448,9 @@ def date_index(value: Any) -> dict[str, Any]:
         rows = [(None, x) for x in value]
     elif isinstance(value, dict):
         fields = ("calendarDate", "date", "startDate", "summaryDate")
-        if any(value.get(k) for k in fields):
+        if (any(value.get(k) for k in fields)
+                or (isinstance(value.get("metaData"), dict)
+                    and value["metaData"].get("calendarDate"))):
             rows = [(None, value)]
         else:
             for k in ("dailySummaries", "daily_summaries", "summaries",

@@ -2,7 +2,7 @@
 
 Uses the same Garmin Personal API client and detail validation as garmin_export.py.
 No Dropbox reads/writes, month-partitioned database storage, or destructive
- database operations. Gear and weight metadata are fetched directly from Garmin.
+database operations. Gear and weight metadata are fetched directly from Garmin.
 """
 from __future__ import annotations
 
@@ -87,6 +87,29 @@ def health_records(source: str, health: dict, allowed_start: date,
         if not isinstance(indexed, dict):
             continue
         by_date = indexed.get("by_date", {})
+        raw = indexed.get("raw")
+        if metric == "weight_measurements":
+            # date_index is date-grained and would overwrite same-day weigh-ins.
+            # Read the raw response first, then merge date-indexed fallbacks.
+            candidates = weight_measurement_rows(raw) if raw is not None else []
+            if isinstance(by_date, dict):
+                candidates.extend(
+                    {"calendarDate": str(day)[:10], "source_payload": payload}
+                    for day, payload in by_date.items() if isinstance(payload, dict)
+                )
+            seen_samples: set[str] = set()
+            for sample in candidates:
+                try:
+                    d = date.fromisoformat(sample["calendarDate"][:10])
+                except (KeyError, ValueError):
+                    continue
+                if not (allowed_start <= d <= allowed_end):
+                    continue
+                signature = json.dumps(sample, sort_keys=True, ensure_ascii=False, default=str)
+                if signature not in seen_samples:
+                    seen_samples.add(signature)
+                    out.append({"metric_source": metric, **sample})
+            continue
         if isinstance(by_date, dict):
             for day, payload in by_date.items():
                 try:
@@ -96,20 +119,10 @@ def health_records(source: str, health: dict, allowed_start: date,
                 if allowed_start <= d <= allowed_end and isinstance(payload, dict):
                     out.append({"metric_source": metric, "calendarDate": d.isoformat(),
                                 "source_payload": payload})
-        raw = indexed.get("raw")
         if raw is not None and not by_date:
-            if metric == "weight_measurements":
-                for sample in weight_measurement_rows(raw):
-                    try:
-                        d = date.fromisoformat(sample["calendarDate"][:10])
-                    except ValueError:
-                        continue
-                    if allowed_start <= d <= allowed_end:
-                        out.append({"metric_source": metric, **sample})
-            else:
-                # Retain unindexed source response as one complete RAW record.
-                out.append({"metric_source": metric, "calendarDate": None,
-                            "source_payload": raw})
+            # Retain unindexed source response as one complete RAW record.
+            out.append({"metric_source": metric, "calendarDate": None,
+                        "source_payload": raw})
     for day, payload in health.get("by_date", {}).items():
         try:
             d = date.fromisoformat(str(day)[:10])

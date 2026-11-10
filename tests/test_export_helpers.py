@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, "src")
 import garmin_export as ge
+import motherduck_export as me
 
 
 class FakeCLI:
@@ -41,6 +42,17 @@ class ExportHelperTests(unittest.TestCase):
     def test_unknown_device_is_null_not_guessed(self):
         row = ge.enrich_device_ids({"detail": {"deviceId": 999999}})
         self.assertIsNone(row["detail"]["device_model"])
+
+    def test_weight_samples_preserve_multiple_measurements_on_same_day(self):
+        payload = [
+            {"metaData": {"calendarDate": "2026-11-06T08:00:00.0", "sequence": 1},
+             "weight": {"weight": 84300.0}},
+            {"metaData": {"calendarDate": "2026-11-06T09:01:20.0", "sequence": 2},
+             "weight": {"weight": 84400.0}},
+        ]
+        rows = me.weight_measurement_rows(payload)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["calendarDate"] for row in rows}, {"2026-11-06"})
 
     def test_date_index_reads_garmin_biometrics_metadata_date(self):
         result = ge.date_index([
