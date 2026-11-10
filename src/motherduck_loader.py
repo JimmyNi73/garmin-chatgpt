@@ -61,10 +61,23 @@ def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
 
 
 def event_date(record: dict[str, Any]) -> str | None:
-    for key in ("calendarDate", "date", "startTimeLocal", "startTimeGMT"):
+    """Resolve dates from flat Garmin records and nested activity summaries."""
+    for key in ("calendarDate", "date", "startTimeLocal", "startTimeGMT",
+                "beginTimestamp", "startTimeGmt"):
         value = record.get(key)
         if value:
+            if isinstance(value, (int, float)):
+                return datetime.fromtimestamp(value / 1000, tz=timezone.utc).date().isoformat()
             return str(value)[:10]
+    summary = record.get("summary")
+    if isinstance(summary, dict):
+        for key in ("calendarDate", "startTimeLocal", "startTimeGMT",
+                    "beginTimestamp", "startTimeGmt"):
+            value = summary.get(key)
+            if value:
+                if isinstance(value, (int, float)):
+                    return datetime.fromtimestamp(value / 1000, tz=timezone.utc).date().isoformat()
+                return str(value)[:10]
     return None
 
 
