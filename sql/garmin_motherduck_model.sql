@@ -1,6 +1,6 @@
 -- Garmin relational model.
 -- Physical CORE tables are populated directly by src/motherduck_loader.py.
--- JSON is retained only as row-level source lineage, not as the analytical model.
+-- JSON is retained as source lineage; source-specific views expose typed measures.
 
 CREATE SCHEMA IF NOT EXISTS raw;
 CREATE SCHEMA IF NOT EXISTS core;
@@ -38,21 +38,42 @@ CREATE TABLE IF NOT EXISTS core.gear (
     loaded_at TIMESTAMPTZ NOT NULL
 );
 
--- Source-specific access paths retain original metric grain and do not fan out
--- when joined to activities. The JSON value preserves Garmin's changing schemas.
 CREATE OR REPLACE VIEW core.health_records AS
 SELECT metric_source, record_key, metric_date, metric_value,
        source_payload, source_run_id, loaded_at
 FROM core.daily_metrics;
 
+-- Garmin weight_measurements contains monthly windows in milliseconds since epoch.
+-- Values are stored in grams; expose kg and the window start/end explicitly.
 CREATE OR REPLACE VIEW core.weight AS
-SELECT record_key, metric_date AS measurement_date,
-       try_cast(coalesce(json_extract_string(metric_value, '$.weight'),
-                         json_extract_string(metric_value, '$.weightInGrams'),
-                         json_extract_string(metric_value, '$.weightKg')) AS DOUBLE) AS weight_value,
-       metric_value AS source_value, source_payload
+SELECT
+    record_key,
+    coalesce(
+        metric_date,
+        try_cast(to_timestamp(try_cast(json_extract_string(metric_value, '$.from') AS BIGINT) / 1000.0) AS DATE)
+    ) AS measurement_date,
+    try_cast(json_extract_string(metric_value, '$.from') AS BIGINT) AS period_start_ms,
+    try_cast(json_extract_string(metric_value, '$.until') AS BIGINT) AS period_end_ms,
+    CASE
+        WHEN try_cast(json_extract_string(metric_value, '$.weight') AS DOUBLE) IS NOT NULL
+            THEN try_cast(json_extract_string(metric_value, '$.weight') AS DOUBLE) / 1000.0
+        WHEN try_cast(json_extract_string(metric_value, '$.weightInGrams') AS DOUBLE) IS NOT NULL
+            THEN try_cast(json_extract_string(metric_value, '$.weightInGrams') AS DOUBLE) / 1000.0
+        ELSE try_cast(json_extract_string(metric_value, '$.weightKg') AS DOUBLE)
+    END AS weight_kg,
+    try_cast(json_extract_string(metric_value, '$.bmi') AS DOUBLE) AS bmi,
+    try_cast(json_extract_string(metric_value, '$.bodyFat') AS DOUBLE) AS body_fat_pct,
+    try_cast(json_extract_string(metric_value, '$.bodyWater') AS DOUBLE) AS body_water_pct,
+    try_cast(json_extract_string(metric_value, '$.muscleMass') AS DOUBLE) / 1000.0 AS muscle_mass_kg,
+    try_cast(json_extract_string(metric_value, '$.boneMass') AS DOUBLE) / 1000.0 AS bone_mass_kg,
+    try_cast(json_extract_string(metric_value, '$.visceralFat') AS DOUBLE) AS visceral_fat,
+    metric_value AS source_value,
+    source_payload
 FROM core.daily_metrics
-WHERE lower(metric_source) LIKE '%weight%';
+WHERE lower(metric_source) LIKE '%weight%'
+  AND (json_extract(metric_value, '$.weight') IS NOT NULL
+       OR json_extract(metric_value, '$.weightInGrams') IS NOT NULL
+       OR json_extract(metric_value, '$.weightKg') IS NOT NULL);
 
 CREATE OR REPLACE VIEW core.sleep AS
 SELECT record_key, metric_date AS sleep_date, metric_source AS sleep_source,
@@ -60,11 +81,25 @@ SELECT record_key, metric_date AS sleep_date, metric_source AS sleep_source,
 FROM core.daily_metrics
 WHERE lower(metric_source) LIKE '%sleep%';
 
+-- HRV source rows are daily summaries. Extract the actual nightly/weekly values,
+-- status and Garmin baseline rather than forcing consumers to parse JSON.
 CREATE OR REPLACE VIEW core.hrv AS
-SELECT record_key, metric_date AS measurement_date, metric_source AS hrv_source,
-       metric_value, source_payload
+SELECT
+    record_key,
+    coalesce(metric_date, try_cast(json_extract_string(metric_value, '$.hrvSummary.calendarDate') AS DATE),
+             try_cast(json_extract_string(metric_value, '$.calendarDate') AS DATE)) AS measurement_date,
+    metric_source AS hrv_source,
+    try_cast(json_extract_string(metric_value, '$.hrvSummary.lastNightAvg') AS DOUBLE) AS last_night_avg_ms,
+    try_cast(json_extract_string(metric_value, '$.hrvSummary.lastNight5MinHigh') AS DOUBLE) AS last_night_5min_high_ms,
+    try_cast(json_extract_string(metric_value, '$.hrvSummary.weeklyAvg') AS DOUBLE) AS weekly_avg_ms,
+    json_extract_string(metric_value, '$.hrvSummary.status') AS hrv_status,
+    try_cast(json_extract_string(metric_value, '$.hrvSummary.baseline.balancedLow') AS DOUBLE) AS baseline_balanced_low_ms,
+    try_cast(json_extract_string(metric_value, '$.hrvSummary.baseline.balancedUpper') AS DOUBLE) AS baseline_balanced_upper_ms,
+    metric_value AS source_value,
+    source_payload
 FROM core.daily_metrics
-WHERE lower(metric_source) LIKE '%hrv%';
+WHERE lower(metric_source) LIKE '%hrv%'
+  AND json_extract(metric_value, '$.hrvSummary') IS NOT NULL;
 
 CREATE OR REPLACE VIEW core.vo2_max AS
 SELECT activity_id, activity_date AS measurement_date, vo2_max,
@@ -105,5 +140,4 @@ SELECT activity_date,
 FROM core.activities
 GROUP BY activity_date;
 
--- Keep same-day health samples separate: never join daily_metrics to activities
--- without first aggregating to the desired metric/date grain.
+-- Keep same-day health samples separate: aggregate to metric/date grain before joining.
