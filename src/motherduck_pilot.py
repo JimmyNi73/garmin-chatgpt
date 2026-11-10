@@ -153,50 +153,61 @@ def main():
         token = auth.obtain_token(resolve_api_key())
         with GarminPersonalApiClient(token.access_token) as api:
             profile = api.get("/userprofile-service/userprofile/settings")
-            profile_id = (profile.get("userProfilePk") or profile.get("userProfileId")
-                          if isinstance(profile, dict) else None)
+            def find_profile_id(node):
+                if isinstance(node, dict):
+                    for key in ("userProfilePk", "userProfileId"):
+                        if node.get(key) is not None:
+                            return node[key]
+                    for value in node.values():
+                        found = find_profile_id(value)
+                        if found is not None:
+                            return found
+                elif isinstance(node, list):
+                    for value in node:
+                        found = find_profile_id(value)
+                        if found is not None:
+                            return found
+                return None
+
+            profile_id = find_profile_id(profile)
             if profile_id is None:
-                profile_id = 3889253
+                raise RuntimeError("Garmin profile response contains no userProfilePk/userProfileId")
             gear_registry = {}
             gear_links = []
             try:
-                gear_rows = api.get("/gear-service/gear/filterGear",
-                                    params={"userProfilePk": str(profile_id)})
-                if isinstance(gear_rows, list):
-                    if len(gear_rows) == 1 and isinstance(gear_rows[0], dict):
-                        gear_rows = gear_rows[0]
-                if isinstance(gear_rows, dict):
-                    rows = gear_rows.get("gearDTOS", gear_rows.get("items", []))
-                    for item in rows:
-                        if isinstance(item, dict):
-                            gid = item.get("gearPk") or item.get("uuid") or item.get("gearUUID")
-                            if gid is not None:
-                                gear_registry[str(gid)] = item
-                    # Garmin can return gear-to-activity mappings in the same response.
-                    links_by_gear = gear_rows.get("gearActivityDTOs", {})
+                gear_payload = api.get("/gear-service/gear/filterGear",
+                                       params={"userProfilePk": str(profile_id)})
+                # Garmin's live filterGear contract returns an ARRAY of gear rows.
+                # Keep compatibility with the wrapped export-like shape too.
+                if isinstance(gear_payload, list) and len(gear_payload) == 1 and isinstance(gear_payload[0], dict) and "gearDTOS" in gear_payload[0]:
+                    gear_payload = gear_payload[0]
+                if isinstance(gear_payload, dict):
+                    gear_rows = gear_payload.get("gearDTOS", gear_payload.get("items", []))
+                    links_by_gear = gear_payload.get("gearActivityDTOs", {})
                     if isinstance(links_by_gear, dict):
                         for gear_id, links in links_by_gear.items():
-                            if not isinstance(links, list):
-                                continue
-                            for link in links:
-                                if isinstance(link, dict) and link.get("activityId") is not None:
-                                    gear_links.append({
-                                        "activityId": str(link["activityId"]),
-                                        "gear_id": str(link.get("gearPk", gear_id)),
-                                    })
-                elif isinstance(gear_rows, list):
-                    for item in gear_rows:
-                        if isinstance(item, dict):
-                            gid = item.get("gearPk") or item.get("uuid") or item.get("gearUUID")
-                            if gid is not None:
-                                gear_registry[str(gid)] = item
+                            if isinstance(links, list):
+                                for link in links:
+                                    if isinstance(link, dict) and link.get("activityId") is not None:
+                                        gear_links.append({"activityId": str(link["activityId"]),
+                                                           "gear_id": str(link.get("gearPk", gear_id))})
+                elif isinstance(gear_payload, list):
+                    gear_rows = gear_payload
+                else:
+                    raise RuntimeError("Garmin gear endpoint returned an unexpected payload")
+                if not isinstance(gear_rows, list):
+                    raise RuntimeError("Garmin gear endpoint returned no gear list")
+                for item in gear_rows:
+                    if isinstance(item, dict):
+                        gid = item.get("gearPk") or item.get("uuid") or item.get("gearUUID")
+                        if gid is not None:
+                            gear_registry[str(gid)] = item
             except Exception as gear_exc:
-                # Gear is optional. Garmin has returned 404 for these endpoints
-                # on accounts where activity data is still available.
-                LOG.warning("Garmin gear registry unavailable; continuing without gear: %s",
-                            gear_exc)
+                LOG.warning("Garmin gear registry unavailable: %s", gear_exc)
 
-            if gear_registry and not gear_links:
+            # The account-level endpoint returns gear only; activity assignments
+            # are exposed by the same endpoint filtered by activityId.
+            if gear_registry:
                 for activity in activities:
                     summary = activity.get("summary", {})
                     aid = summary.get("activityId") or summary.get("activity_id")
@@ -207,8 +218,12 @@ def main():
                                          params={"activityId": str(aid)})
                         linked_rows = linked if isinstance(linked, list) else ([linked] if isinstance(linked, dict) else [])
                         for gear in linked_rows:
-                            if isinstance(gear, dict):
-                                gear_links.append({"activityId": str(aid), "gear": gear})
+                            if not isinstance(gear, dict):
+                                continue
+                            gid = gear.get("gearPk") or gear.get("uuid") or gear.get("gearUUID")
+                            if gid is not None:
+                                gear_registry.setdefault(str(gid), gear)
+                                gear_links.append({"activityId": str(aid), "gear_id": str(gid)})
                     except Exception as exc:
                         LOG.warning("Gear lookup for activity %s unavailable: %s", aid, exc)
             datasets["gear_registry"] = list(gear_registry.values())
