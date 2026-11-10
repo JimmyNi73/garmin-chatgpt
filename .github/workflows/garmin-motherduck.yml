@@ -1,0 +1,53 @@
+name: Garmin to MotherDuck | Full History
+
+on:
+  push:
+    branches:
+      - feature/motherduck-service-db
+  workflow_dispatch:
+    inputs:
+      confirm_run:
+        description: "Type START to confirm the Garmin full-history load"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: garmin-motherduck-production
+  cancel-in-progress: true
+
+jobs:
+  ingest:
+    if: ${{ (github.event_name == 'push' && contains(github.event.head_commit.message, '[run-garmin]')) || inputs.confirm_run == 'START' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade garmin-connect-personal-api-python duckdb==1.5.6
+
+      - name: Validate Python syntax
+        run: python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_export.py
+
+      - name: Run exporter unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Ingest complete Garmin history into MotherDuck
+        env:
+          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+          MOTHERDUCK_DATABASE: garmin_github
+          GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
+          GARMIN_BATCH_PAUSE_SECONDS: "5"
+          GARMIN_MAX_RETRIES: "8"
+          GARMIN_HISTORY_MODE: "full"
+        run: python src/motherduck_export.py
