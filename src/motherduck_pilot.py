@@ -88,8 +88,15 @@ def main():
                         datasets[source_name] = []
                     LOG.info("%s: %d records", source_name, len(datasets[source_name]))
                 except Exception as exc:
-                    errors.append({"source": source_name, "error": str(exc)})
-                    LOG.exception("%s endpoint unavailable", source_name)
+                    # Garmin currently returns 404 for these optional metrics
+                    # endpoints on this account. Keep the pilot useful: record
+                    # the source as empty, but do not fail a successful RAW load.
+                    if "404" in str(exc):
+                        datasets[source_name] = []
+                        LOG.warning("%s endpoint returned 404; loading continues with no rows", source_name)
+                    else:
+                        errors.append({"source": source_name, "error": str(exc)})
+                        LOG.exception("%s endpoint unavailable", source_name)
 
     for source_name, command in RANGE_SOURCES.items():
         ok, value = optional_range(
