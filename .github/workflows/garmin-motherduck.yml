@@ -38,7 +38,7 @@ jobs:
       - name: Validate Python syntax
         run: python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_export.py
 
-      - name: Run exporter unit tests
+      - name: Validate ingestion logic
         run: python -m unittest discover -s tests -v
 
       - name: Ingest complete Garmin history into MotherDuck
