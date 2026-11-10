@@ -29,7 +29,7 @@ def stable_record_key(source_name: str, record: dict[str, Any], index: int) -> s
 def connect(database: str | None = None) -> duckdb.DuckDBPyConnection:
     if not os.getenv("MOTHERDUCK_TOKEN"):
         raise RuntimeError("MOTHERDUCK_TOKEN is not configured")
-    target = database or os.getenv("MOTHERDUCK_DATABASE", "my_db")
+    target = database or os.getenv("MOTHERDUCK_DATABASE", "garmin")
     return duckdb.connect(f"md:{target}")
 
 
