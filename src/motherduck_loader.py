@@ -130,7 +130,7 @@ def _json(value: Any) -> str:
 
 def _bulk_insert(con: duckdb.DuckDBPyConnection, table: str, rows: list[tuple],
                  value_template: str, conflict_clause: str = "",
-                 chunk_size: int = 200) -> None:
+                 chunk_size: int = 500) -> None:
     """Send bounded multi-row INSERT statements instead of one network round-trip per row."""
     if not rows:
         return
