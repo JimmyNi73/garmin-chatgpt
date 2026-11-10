@@ -1,6 +1,9 @@
 name: Garmin MotherDuck Test (manual only)
 
 on:
+  push:
+    branches:
+      - feature/motherduck-service-db
   workflow_dispatch:
     inputs:
       confirm_test:
@@ -17,7 +20,7 @@ concurrency:
 
 jobs:
   ingest:
-    if: ${{ inputs.confirm_test == 'RUN' }}
+    if: ${{ (github.event_name == 'push' && contains(github.event.head_commit.message, '[run-garmin-test]')) || inputs.confirm_test == 'RUN' }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
