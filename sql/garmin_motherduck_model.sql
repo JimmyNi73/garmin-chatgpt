@@ -2,6 +2,18 @@
 -- RAW stores one complete source record per natural record key. No month/file partitioning.
 -- Apply after raw.garmin_payloads has been created by src/motherduck_loader.py.
 
+-- Base landing table: one complete JSON record per source + stable record key.
+CREATE SCHEMA IF NOT EXISTS raw;
+CREATE TABLE IF NOT EXISTS raw.garmin_payloads (
+    source_name VARCHAR NOT NULL,
+    record_key VARCHAR NOT NULL,
+    event_date DATE,
+    payload JSON NOT NULL,
+    source_run_id VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (source_name, record_key)
+);
+
 CREATE SCHEMA IF NOT EXISTS core;
 CREATE SCHEMA IF NOT EXISTS mart;
 
