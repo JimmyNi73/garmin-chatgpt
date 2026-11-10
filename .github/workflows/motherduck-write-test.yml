@@ -1,4 +1,4 @@
-name: MotherDuck service-account write test
+name: MotherDuck service-account database creation and write test
 
 on:
   push:
@@ -21,7 +21,7 @@ jobs:
       - name: Install DuckDB client
         run: python -m pip install 'duckdb==1.5.6'
 
-      - name: Test GithubGarmin database write access
+      - name: Test service-account database creation and write access
         env:
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
         run: |
@@ -30,19 +30,43 @@ jobs:
           import duckdb
 
           if not os.environ.get("MOTHERDUCK_TOKEN"):
-              raise RuntimeError("MOTHERDUCK_TOKEN secret is missing")
+              raise RuntimeError("AUTH_FAILED: MOTHERDUCK_TOKEN secret is missing")
 
-          con = duckdb.connect("md:garmin")
-          table = "main.__githubgarmin_write_test"
+          db_name = "__githubgarmin_write_test"
+          table_name = "main.write_probe"
+
+          print("STAGE 1: Connecting to MotherDuck account (no database selected).")
+          admin = duckdb.connect("md:")
+          target = None
+          created = False
+
           try:
-              con.execute(f"CREATE TABLE {table} (id INTEGER, note VARCHAR)")
-              con.execute(f"INSERT INTO {table} VALUES (1, 'write access confirmed')")
-              result = con.execute(f"SELECT id, note FROM {table}").fetchone()
-              if result != (1, "write access confirmed"):
-                  raise RuntimeError(f"Unexpected test result: {result!r}")
-              print("WRITE_TEST_SUCCESS: connected, created table, inserted, and read back a row.")
+              print(f"STAGE 2: Creating isolated test database {db_name}.")
+              admin.execute(f"CREATE DATABASE IF NOT EXISTS {db_name}")
+              created = True
+
+              print("STAGE 3: Connecting to the test database.")
+              target = duckdb.connect(f"md:{db_name}")
+
+              print("STAGE 4: Creating table and inserting a test row.")
+              target.execute(f"CREATE TABLE {table_name} (id INTEGER, note VARCHAR)")
+              target.execute(f"INSERT INTO {table_name} VALUES (1, 'service account write confirmed')")
+
+              print("STAGE 5: Reading back the test row.")
+              result = target.execute(f"SELECT id, note FROM {table_name}").fetchone()
+              if result != (1, "service account write confirmed"):
+                  raise RuntimeError(f"READ_BACK_FAILED: unexpected result {result!r}")
+
+              print("SUCCESS: service account connected, created a database, created a table, inserted, and read back a row.")
           finally:
-              con.execute(f"DROP TABLE IF EXISTS {table}")
-              print("CLEANUP_SUCCESS: test table dropped.")
-              con.close()
+              if target is not None:
+                  try:
+                      target.execute(f"DROP TABLE IF EXISTS {table_name}")
+                  finally:
+                      target.close()
+              if created:
+                  print("STAGE 6: Dropping the isolated test database.")
+                  admin.execute(f"DROP DATABASE IF EXISTS {db_name}")
+                  print("CLEANUP_SUCCESS: isolated test database dropped.")
+              admin.close()
           PY
