@@ -1,142 +1,88 @@
--- Garmin -> MotherDuck relational model
--- RAW stores one complete source record per natural record key. No month/file partitioning.
--- Apply after raw.garmin_payloads has been created by src/motherduck_loader.py.
+-- Garmin relational model.
+-- Physical CORE tables are populated directly by src/motherduck_loader.py.
+-- JSON is retained only as row-level source lineage, not as the analytical model.
 
--- Base landing table: one complete JSON record per source + stable record key.
 CREATE SCHEMA IF NOT EXISTS raw;
-CREATE TABLE IF NOT EXISTS raw.garmin_payloads (
-    source_name VARCHAR NOT NULL,
-    record_key VARCHAR NOT NULL,
-    event_date DATE,
-    payload JSON NOT NULL,
-    source_run_id VARCHAR NOT NULL,
-    loaded_at TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (source_name, record_key)
-);
-
 CREATE SCHEMA IF NOT EXISTS core;
 CREATE SCHEMA IF NOT EXISTS mart;
 
--- One row per Garmin activity. Keep the original record available for fields
--- whose Garmin naming/availability differs between device generations.
-CREATE OR REPLACE VIEW core.activities AS
-WITH src AS (
-    SELECT record_key, payload, source_run_id, loaded_at
-    FROM raw.garmin_payloads
-    WHERE source_name = 'activities'
-)
-SELECT
-    coalesce(json_extract_string(payload, '$.summary.activityId'),
-             json_extract_string(payload, '$.activityId'), record_key) AS activity_id,
-    try_cast(substr(coalesce(
-        json_extract_string(payload, '$.summary.startTimeLocal'),
-        json_extract_string(payload, '$.summary.startTimeGMT'),
-        json_extract_string(payload, '$.summary.beginTimestamp'),
-        json_extract_string(payload, '$.startTimeLocal')
-    ), 1, 10) AS DATE) AS activity_date,
-    coalesce(json_extract_string(payload, '$.summary.activityType.typeKey'),
-             json_extract_string(payload, '$.summary.activityType.typeName'),
-             json_extract_string(payload, '$.summary.activityType')) AS activity_type,
-    coalesce(json_extract_string(payload, '$.summary.activityName'),
-             json_extract_string(payload, '$.detail.activityName')) AS activity_name,
-    try_cast(json_extract_string(payload, '$.summary.distance') AS DOUBLE) AS distance_m,
-    try_cast(json_extract_string(payload, '$.summary.duration') AS DOUBLE) AS duration_s,
-    try_cast(json_extract_string(payload, '$.summary.elapsedDuration') AS DOUBLE) AS elapsed_duration_s,
-    try_cast(json_extract_string(payload, '$.summary.averageSpeed') AS DOUBLE) AS average_speed_m_s,
-    try_cast(json_extract_string(payload, '$.summary.averageHR') AS DOUBLE) AS average_hr,
-    try_cast(json_extract_string(payload, '$.summary.maxHR') AS DOUBLE) AS max_hr,
-    try_cast(json_extract_string(payload, '$.summary.calories') AS DOUBLE) AS calories,
-    try_cast(json_extract_string(payload, '$.summary.averageRunCadence') AS DOUBLE) AS average_run_cadence,
-    try_cast(json_extract_string(payload, '$.summary.maxRunCadence') AS DOUBLE) AS max_run_cadence,
-    try_cast(json_extract_string(payload, '$.summary.vO2MaxValue') AS DOUBLE) AS vo2_max,
-    coalesce(json_extract_string(payload, '$.summary.deviceId'),
-             json_extract_string(payload, '$.device.deviceId')) AS device_id,
-    payload AS source_payload,
-    source_run_id, loaded_at
-FROM src;
+CREATE TABLE IF NOT EXISTS core.activities (
+    activity_id VARCHAR PRIMARY KEY, activity_date DATE, activity_type VARCHAR,
+    activity_name VARCHAR, distance_m DOUBLE, duration_s DOUBLE,
+    elapsed_duration_s DOUBLE, average_speed_m_s DOUBLE,
+    average_hr DOUBLE, max_hr DOUBLE, calories DOUBLE,
+    average_run_cadence DOUBLE, max_run_cadence DOUBLE, vo2_max DOUBLE,
+    device_id VARCHAR, gear_id VARCHAR, source_payload JSON NOT NULL,
+    source_run_id VARCHAR NOT NULL, loaded_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS core.daily_metrics (
+    metric_source VARCHAR NOT NULL, record_key VARCHAR NOT NULL,
+    metric_date DATE, metric_value JSON, source_payload JSON NOT NULL,
+    source_run_id VARCHAR NOT NULL, loaded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (metric_source, record_key)
+);
+CREATE TABLE IF NOT EXISTS core.devices (
+    device_id VARCHAR PRIMARY KEY, device_model VARCHAR,
+    source_payload JSON NOT NULL, source_run_id VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS core.gear (
+    gear_id VARCHAR PRIMARY KEY, gear_name VARCHAR,
+    source_payload JSON NOT NULL, source_run_id VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL
+);
 
--- Preserve workout structures independently; activity id remains the parent key.
-CREATE OR REPLACE VIEW core.activity_workouts AS
-SELECT
-    coalesce(json_extract_string(p.payload, '$.summary.activityId'),
-             json_extract_string(p.payload, '$.activityId')) AS activity_id,
-    w.key AS workout_index,
-    w.value AS workout_payload,
-    p.source_run_id, p.loaded_at
-FROM raw.garmin_payloads AS p,
-     LATERAL json_each(p.payload, '$.workouts') AS w
-WHERE p.source_name = 'activities'
-  AND json_type(json_extract(p.payload, '$.workouts')) = 'ARRAY';
-
--- Generic source-grain health records. This avoids multiplying daily measures
--- when joining them to multiple activities on the same day.
+-- Source-specific access paths retain original metric grain and do not fan out
+-- when joined to activities. The JSON value preserves Garmin's changing schemas.
 CREATE OR REPLACE VIEW core.health_records AS
-SELECT source_name AS metric_source,
-       record_key,
-       event_date AS metric_date,
-       payload AS source_payload,
-       source_run_id, loaded_at
-FROM raw.garmin_payloads
-WHERE source_name NOT IN ('activities', 'gear_registry', 'devices');
+SELECT metric_source, record_key, metric_date, metric_value,
+       source_payload, source_run_id, loaded_at
+FROM core.daily_metrics;
 
 CREATE OR REPLACE VIEW core.weight AS
-SELECT record_key, event_date AS measurement_date,
-       try_cast(coalesce(json_extract_string(payload, '$.weight'),
-                         json_extract_string(payload, '$.weightInGrams')) AS DOUBLE) AS weight_value,
-       payload AS source_payload
-FROM raw.garmin_payloads
-WHERE source_name = 'weight_measurements';
+SELECT record_key, metric_date AS measurement_date,
+       try_cast(coalesce(json_extract_string(metric_value, '$.weight'),
+                         json_extract_string(metric_value, '$.weightInGrams'),
+                         json_extract_string(metric_value, '$.weightKg')) AS DOUBLE) AS weight_value,
+       metric_value AS source_value, source_payload
+FROM core.daily_metrics
+WHERE lower(metric_source) LIKE '%weight%';
 
 CREATE OR REPLACE VIEW core.sleep AS
-SELECT record_key, event_date AS sleep_date, source_name AS sleep_source,
-       payload AS source_payload
-FROM raw.garmin_payloads
-WHERE source_name IN ('sleep_summaries', 'sleep_daily');
+SELECT record_key, metric_date AS sleep_date, metric_source AS sleep_source,
+       metric_value, source_payload
+FROM core.daily_metrics
+WHERE lower(metric_source) LIKE '%sleep%';
 
 CREATE OR REPLACE VIEW core.hrv AS
-SELECT record_key, event_date AS measurement_date, source_name AS hrv_source,
-       payload AS source_payload
-FROM raw.garmin_payloads
-WHERE source_name IN ('hrv_summaries', 'hrv_daily');
+SELECT record_key, metric_date AS measurement_date, metric_source AS hrv_source,
+       metric_value, source_payload
+FROM core.daily_metrics
+WHERE lower(metric_source) LIKE '%hrv%';
 
 CREATE OR REPLACE VIEW core.vo2_max AS
 SELECT activity_id, activity_date AS measurement_date, vo2_max,
        'activity_summary' AS measurement_source
 FROM core.activities
-WHERE vo2_max IS NOT NULL;
-
--- Gear is loaded only from retained ZIP/Dropbox source data; no undocumented
--- Garmin gear endpoint is called by this model or its loader.
-CREATE OR REPLACE VIEW core.gear AS
-SELECT record_key AS gear_key,
-       coalesce(json_extract_string(payload, '$.gearPk'),
-                json_extract_string(payload, '$.gearId'),
-                json_extract_string(payload, '$.gear_id'),
-                record_key) AS gear_id,
-       coalesce(json_extract_string(payload, '$.customMakeModel'),
-                json_extract_string(payload, '$.name'),
-                json_extract_string(payload, '$.displayName')) AS gear_name,
-       payload AS source_payload
-FROM raw.garmin_payloads
-WHERE source_name = 'gear_registry';
-
-CREATE OR REPLACE VIEW core.activity_gear AS
-SELECT activity_id,
-       coalesce(json_extract_string(source_payload, '$.gear.gearPk'),
-                json_extract_string(source_payload, '$.gear.gearId'),
-                json_extract_string(source_payload, '$.gear.gear_id'),
-                json_extract_string(source_payload, '$.summary.gearId')) AS gear_id
-FROM core.activities
-WHERE coalesce(json_extract_string(source_payload, '$.gear.gearPk'),
-               json_extract_string(source_payload, '$.gear.gearId'),
-               json_extract_string(source_payload, '$.gear.gear_id'),
-               json_extract_string(source_payload, '$.summary.gearId')) IS NOT NULL;
+WHERE vo2_max IS NOT NULL
+UNION ALL
+SELECT record_key, metric_date,
+       try_cast(coalesce(json_extract_string(metric_value, '$.vo2Max'),
+                         json_extract_string(metric_value, '$.vo2MaxValue'),
+                         json_extract_string(metric_value, '$.value')) AS DOUBLE),
+       metric_source
+FROM core.daily_metrics
+WHERE lower(metric_source) LIKE '%vo2%'
+  AND coalesce(json_extract_string(metric_value, '$.vo2Max'),
+               json_extract_string(metric_value, '$.vo2MaxValue'),
+               json_extract_string(metric_value, '$.value')) IS NOT NULL;
 
 CREATE OR REPLACE VIEW mart.running_performance AS
 SELECT activity_id, activity_date, activity_name, activity_type,
        distance_m, duration_s,
        CASE WHEN distance_m > 0 THEN duration_s / (distance_m / 1000.0) END AS pace_sec_per_km,
-       average_speed_m_s, average_hr, max_hr, average_run_cadence, vo2_max
+       average_speed_m_s, average_hr, max_hr, average_run_cadence, vo2_max,
+       device_id, gear_id
 FROM core.activities
 WHERE lower(coalesce(activity_type, '')) LIKE '%run%';
 
@@ -153,5 +99,5 @@ SELECT activity_date,
 FROM core.activities
 GROUP BY activity_date;
 
--- Do not join core.health_records directly to activities without first
--- aggregating/deduplicating by metric source + date + record key.
+-- Keep same-day health samples separate: never join daily_metrics to activities
+-- without first aggregating to the desired metric/date grain.
