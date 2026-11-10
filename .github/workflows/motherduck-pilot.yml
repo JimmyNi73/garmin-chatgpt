@@ -1,7 +1,15 @@
 name: Garmin MotherDuck Test
 
 on:
-  # Manual only: never start ingestion on push.
+  push:
+    branches:
+      - feature/motherduck-service-db
+    paths:
+      - "src/motherduck_loader.py"
+      - "src/motherduck_export.py"
+      - "sql/garmin_motherduck_model.sql"
+      - "tests/**"
+      - ".github/workflows/motherduck-pilot.yml"
   workflow_dispatch:
     inputs:
       confirm_test:
@@ -18,7 +26,7 @@ concurrency:
 
 jobs:
   ingest:
-    if: ${{ inputs.confirm_test == 'RUN' }}
+    if: ${{ github.event_name == 'push' || inputs.confirm_test == 'RUN' }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
