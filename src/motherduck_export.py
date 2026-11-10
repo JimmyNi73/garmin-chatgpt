@@ -1,8 +1,8 @@
 """Controlled record-level Garmin -> MotherDuck test.
 
 Uses the same Garmin Personal API client and detail validation as garmin_export.py.
-No Dropbox reads/writes, gear endpoint calls, month-partitioned database storage,
-or destructive database operations.
+No Dropbox reads/writes, month-partitioned database storage, or destructive
+ database operations. Gear and weight metadata are fetched directly from Garmin.
 """
 from __future__ import annotations
 
@@ -40,7 +40,42 @@ def date_of(row: dict) -> str | None:
         value = row.get(key)
         if value:
             return str(value)[:10]
+    metadata = row.get("metaData")
+    if isinstance(metadata, dict) and metadata.get("calendarDate"):
+        return str(metadata["calendarDate"])[:10]
     return None
+
+
+def weight_measurement_rows(value: object) -> list[dict]:
+    """Find individual Garmin weight samples in nested/list API responses."""
+    found: list[dict] = []
+    seen: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+        weight = node.get("weight")
+        has_weight = (
+            isinstance(weight, dict) and weight.get("weight") is not None
+        ) or any(node.get(key) is not None for key in
+                 ("weightInGrams", "weightKg"))
+        if has_weight:
+            day = date_of(node)
+            if day:
+                key = json.dumps(node, sort_keys=True, ensure_ascii=False, default=str)
+                if key not in seen:
+                    seen.add(key)
+                    found.append({"calendarDate": day, "source_payload": node})
+        for child in node.values():
+            if isinstance(child, (dict, list)):
+                walk(child)
+
+    walk(value)
+    return found
 
 
 def health_records(source: str, health: dict, allowed_start: date,
@@ -63,9 +98,18 @@ def health_records(source: str, health: dict, allowed_start: date,
                                 "source_payload": payload})
         raw = indexed.get("raw")
         if raw is not None and not by_date:
-            # Retain unindexed source response as one complete RAW record.
-            out.append({"metric_source": metric, "calendarDate": None,
-                        "source_payload": raw})
+            if metric == "weight_measurements":
+                for sample in weight_measurement_rows(raw):
+                    try:
+                        d = date.fromisoformat(sample["calendarDate"][:10])
+                    except ValueError:
+                        continue
+                    if allowed_start <= d <= allowed_end:
+                        out.append({"metric_source": metric, **sample})
+            else:
+                # Retain unindexed source response as one complete RAW record.
+                out.append({"metric_source": metric, "calendarDate": None,
+                            "source_payload": raw})
     for day, payload in health.get("by_date", {}).items():
         try:
             d = date.fromisoformat(str(day)[:10])

@@ -42,6 +42,14 @@ class ExportHelperTests(unittest.TestCase):
         row = ge.enrich_device_ids({"detail": {"deviceId": 999999}})
         self.assertIsNone(row["detail"]["device_model"])
 
+    def test_date_index_reads_garmin_biometrics_metadata_date(self):
+        result = ge.date_index([
+            {"metaData": {"calendarDate": "2026-11-06T09:01:20.0"},
+             "weight": {"weight": 84300.0, "sourceType": "MANUAL"}}
+        ])
+        self.assertIn("2026-11-06", result["by_date"])
+        self.assertEqual(result["by_date"]["2026-11-06"]["weight"]["weight"], 84300.0)
+
     def test_month_health_clamps_range_to_today(self):
         class RecordingCLI:
             def __init__(self):

@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   ingest:
-    if: ${{ github.event_name == 'push' || inputs.confirm_test == 'RUN' }}
+    if: ${{ inputs.confirm_test == 'RUN' }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:

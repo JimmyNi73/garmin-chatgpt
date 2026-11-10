@@ -472,6 +472,10 @@ def date_index(value: Any) -> dict[str, Any]:
                 if row.get(k):
                     d = str(row[k])[:10]
                     break
+        if not d and isinstance(row.get("metaData"), dict):
+            value = row["metaData"].get("calendarDate")
+            if value:
+                d = str(value)[:10]
         if d:
             indexed[d] = row
     return {"raw": value, "by_date": indexed}
