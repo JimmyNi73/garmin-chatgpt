@@ -33,11 +33,63 @@ RANGE_SOURCES = {
 
 
 def records_from_indexed(value):
+    """Normalize Garmin range responses, including nested weight summaries."""
+    rows = None
+    if isinstance(value, dict):
+        for key in ("dailyWeightSummaries", "dailySummaries", "summaries", "items", "data"):
+            if isinstance(value.get(key), list):
+                rows = value[key]
+                break
+    elif isinstance(value, list):
+        rows = value
+    if rows is not None:
+        output = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            day = next((str(row[k])[:10] for k in
+                        ("calendarDate", "date", "measurementDate", "startDate")
+                        if row.get(k)), None)
+            if day:
+                output.append({"calendarDate": day, **row})
+        return output
     indexed = date_index(value)
-    return [
-        {"calendarDate": day, **(row if isinstance(row, dict) else {"value": row})}
-        for day, row in indexed["by_date"].items()
-    ]
+    return [{"calendarDate": day, **row}
+            for day, row in indexed["by_date"].items()]
+
+
+def fetch_range_chunked(cli, command, start, end, max_days=28):
+    """Fetch Garmin date ranges in bounded windows and merge responses."""
+    merged = []
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(end, cursor + timedelta(days=max_days - 1))
+        value = cli.run(f"{command} {cursor}..{chunk_end}", command,
+                        "--start-date", cursor.isoformat(),
+                        "--end-date", chunk_end.isoformat())
+        if isinstance(value, list):
+            merged.extend(value)
+        elif isinstance(value, dict):
+            merged.append(value)
+        cursor = chunk_end + timedelta(days=1)
+    return merged
+
+
+def normalize_vo2_response(value, requested_day=None):
+    items = value if isinstance(value, list) else [value] if isinstance(value, dict) else []
+    output = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for sport in ("generic", "cycling"):
+            metric = item.get(sport)
+            if isinstance(metric, dict) and metric.get("vo2MaxValue") is not None:
+                day = metric.get("calendarDate") or item.get("calendarDate") or requested_day
+                if day:
+                    output.append({"calendarDate": str(day)[:10], "sport": sport,
+                                   "vo2MaxValue": metric["vo2MaxValue"],
+                                   "source_payload": metric})
+    return output
 
 
 def main():
@@ -69,53 +121,92 @@ def main():
     cli = GarminCLI()
     summaries = fetch_activities(cli, start_text, end_text)
     activities = activity_records(cli, summaries)
-    try:
-        gear_registry, activity_to_gear = fetch_gear_data(cli)
-        enrich_gear_records(activities, gear_registry, activity_to_gear)
-        LOG.info("Gear resolved: %d items, %d activity links",
-                 len(gear_registry), len(activity_to_gear))
-    except Exception:
-        LOG.exception("Gear endpoint unavailable; pilot continues with gear omitted")
-
     datasets = {"activities": activities}
     errors = []
-    # These range endpoints are not exposed by the existing gc-personal CLI
-    # wrapper; call them with the same Garmin Personal API token flow as gear.
+
     with PersonalApiAuthenticator() as auth:
         token = auth.obtain_token(resolve_api_key())
         with GarminPersonalApiClient(token.access_token) as api:
-            for source_name, endpoint in (
-                ("vo2_max_daily", f"/metrics-service/metrics/maxmet/daily/{start_text}/{end_text}"),
-                ("training_readiness_daily", f"/metrics-service/metrics/trainingreadiness/{start_text}/{end_text}"),
-            ):
+            profile = api.get("/userprofile-service/userprofile/settings")
+            profile_id = (profile.get("userProfilePk") or profile.get("userProfileId")
+                          if isinstance(profile, dict) else None)
+            if profile_id is None:
+                profile_id = 3889253
+            gear_registry = {}
+            gear_rows = api.get("/gear-service/gear/filterGear",
+                                params={"userProfilePk": str(profile_id)})
+            if isinstance(gear_rows, list):
+                for item in gear_rows:
+                    if isinstance(item, dict):
+                        gid = item.get("gearPk") or item.get("uuid") or item.get("gearUUID")
+                        if gid is not None:
+                            gear_registry[str(gid)] = item
+            elif isinstance(gear_rows, dict):
+                for item in gear_rows.get("gearDTOS", []):
+                    if isinstance(item, dict):
+                        gid = item.get("gearPk") or item.get("uuid")
+                        if gid is not None:
+                            gear_registry[str(gid)] = item
+
+            gear_links = []
+            for activity in activities:
+                summary = activity.get("summary", {})
+                aid = summary.get("activityId") or summary.get("activity_id")
+                if aid is None:
+                    continue
                 try:
-                    response = api.get(endpoint)
-                    if isinstance(response, list):
-                        datasets[source_name] = [row for row in response if isinstance(row, dict)]
-                    elif isinstance(response, dict):
-                        datasets[source_name] = [response]
-                    else:
-                        datasets[source_name] = []
-                    LOG.info("%s: %d records", source_name, len(datasets[source_name]))
+                    linked = api.get("/gear-service/gear/filterGear",
+                                     params={"activityId": str(aid)})
+                    linked_rows = linked if isinstance(linked, list) else ([linked] if isinstance(linked, dict) else [])
+                    for gear in linked_rows:
+                        if isinstance(gear, dict):
+                            gear_links.append({"activityId": str(aid), "gear": gear})
                 except Exception as exc:
-                    # Garmin currently returns 404 for these optional metrics
-                    # endpoints on this account. Keep the pilot useful: record
-                    # the source as empty, but do not fail a successful RAW load.
-                    if "404" in str(exc):
-                        datasets[source_name] = []
-                        LOG.warning("%s endpoint returned 404; loading continues with no rows", source_name)
-                    else:
-                        errors.append({"source": source_name, "error": str(exc)})
-                        LOG.exception("%s endpoint unavailable", source_name)
+                    LOG.warning("Gear lookup for activity %s failed: %s", aid, exc)
+            datasets["gear_registry"] = list(gear_registry.values())
+            datasets["gear_activity_links"] = gear_links
+            LOG.info("Gear: %d registry entries, %d activity links",
+                     len(datasets["gear_registry"]), len(gear_links))
+
+            vo2_rows = []
+            try:
+                vo2_rows = normalize_vo2_response(
+                    api.get(f"/metrics-service/metrics/maxmet/daily/{start_text}/{end_text}"))
+            except Exception as exc:
+                LOG.warning("VO2 range endpoint failed; trying per-day latest: %s", exc)
+            if not vo2_rows:
+                cursor = start
+                while cursor <= end:
+                    day = cursor.isoformat()
+                    try:
+                        vo2_rows.extend(normalize_vo2_response(
+                            api.get(f"/metrics-service/metrics/maxmet/latest/{day}"), day))
+                    except Exception as exc:
+                        if "404" not in str(exc):
+                            LOG.warning("VO2 %s failed: %s", day, exc)
+                    cursor += timedelta(days=1)
+            datasets["vo2_max_daily"] = vo2_rows
+            LOG.info("VO2 max: %d measurements", len(vo2_rows))
+
+            try:
+                readiness = api.get(
+                    f"/metrics-service/metrics/trainingreadiness/{start_text}/{end_text}")
+                datasets["training_readiness_daily"] = (
+                    readiness if isinstance(readiness, list) else
+                    [readiness] if isinstance(readiness, dict) else [])
+            except Exception as exc:
+                datasets["training_readiness_daily"] = []
+                LOG.warning("Training readiness unavailable: %s", exc)
 
     for source_name, command in RANGE_SOURCES.items():
-        ok, value = optional_range(
-            cli, errors, [], source_name,
-            command, "--start-date", start_text, "--end-date", end_text
-        )
-        datasets[source_name] = records_from_indexed(value) if ok and value is not None else []
-        LOG.info("%s: %d records%s", source_name, len(datasets[source_name]),
-                 "" if ok else " (API error)")
+        try:
+            value = fetch_range_chunked(cli, command, start, end, max_days=28)
+            datasets[source_name] = records_from_indexed(value)
+            LOG.info("%s: %d records", source_name, len(datasets[source_name]))
+        except Exception as exc:
+            errors.append({"source": source_name, "error": str(exc)})
+            datasets[source_name] = []
+            LOG.exception("%s failed", source_name)
 
     # Daily endpoints are queried by date, as required by Garmin's API.
     for source_name, command in (

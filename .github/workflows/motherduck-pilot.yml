@@ -34,9 +34,15 @@ jobs:
           - period: "2011-08"
             start_date: "2011-08-01"
             end_date: "2011-08-31"
+            days: ""
           - period: "2022-10"
             start_date: "2022-10-01"
             end_date: "2022-10-31"
+            days: ""
+          - period: "recent-14-days"
+            start_date: ""
+            end_date: ""
+            days: "14"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,6 +67,7 @@ jobs:
           MOTHERDUCK_DATABASE: garmin_github
           PILOT_START_DATE: ${{ matrix.start_date }}
           PILOT_END_DATE: ${{ matrix.end_date }}
+          PILOT_DAYS: ${{ matrix.days || '14' }}
           GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
           GARMIN_BATCH_PAUSE_SECONDS: "5"
           GARMIN_MAX_RETRIES: "5"
