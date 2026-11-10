@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+import requests
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -97,6 +98,13 @@ def normalize_vo2_response(value, requested_day=None):
     output = []
     for item in items:
         if not isinstance(item, dict):
+            continue
+        if item.get("vo2MaxValue") is not None:
+            day = item.get("calendarDate") or requested_day
+            if day:
+                output.append({"calendarDate": str(day)[:10],
+                               "sport": item.get("sport") or item.get("maxMetCategory") or "unknown",
+                               "vo2MaxValue": item["vo2MaxValue"], "source_payload": item})
             continue
         for sport in ("generic", "cycling"):
             metric = item.get(sport)
@@ -235,8 +243,29 @@ def main():
                     readiness if isinstance(readiness, list) else
                     [readiness] if isinstance(readiness, dict) else [])
             except Exception as exc:
-                datasets["training_readiness_daily"] = []
-                LOG.warning("Training readiness unavailable: %s", exc)
+                LOG.warning("Training readiness range unavailable; trying daily endpoints: %s", exc)
+                readiness_rows = []
+                cursor = start
+                while cursor <= end:
+                    day = cursor.isoformat()
+                    for path in (f"/metrics-service/metrics/trainingreadiness/{day}",
+                                 f"/metrics-service/metrics/trainingreadiness/daily/{day}"):
+                        try:
+                            value = api.get(path)
+                            if isinstance(value, list):
+                                readiness_rows.extend(value)
+                            elif isinstance(value, dict):
+                                readiness_rows.append(value)
+                            if any(isinstance(row, dict) and row.get("calendarDate") == day
+                                   for row in readiness_rows):
+                                break
+                        except Exception as daily_exc:
+                            if "404" not in str(daily_exc):
+                                LOG.warning("Readiness %s failed: %s", day, daily_exc)
+                    cursor += timedelta(days=1)
+                datasets["training_readiness_daily"] = readiness_rows
+            LOG.info("Training readiness: %d measurements",
+                     len(datasets["training_readiness_daily"]))
 
     for source_name, command in RANGE_SOURCES.items():
         try:
