@@ -1,6 +1,9 @@
 name: Garmin MotherDuck Pilot
 
 on:
+  push:
+    branches:
+      - feature/motherduck-ingestion
   workflow_dispatch:
     inputs:
       days:
@@ -46,7 +49,7 @@ jobs:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
           MOTHERDUCK_DATABASE: garmin
-          PILOT_DAYS: ${{ inputs.days }}
+          PILOT_DAYS: ${{ inputs.days || '14' }}
           GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
           GARMIN_BATCH_PAUSE_SECONDS: "5"
           GARMIN_MAX_RETRIES: "5"
