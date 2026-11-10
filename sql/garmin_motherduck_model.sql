@@ -11,10 +11,15 @@ CREATE TABLE IF NOT EXISTS core.activities (
     activity_name VARCHAR, distance_m DOUBLE, duration_s DOUBLE,
     elapsed_duration_s DOUBLE, average_speed_m_s DOUBLE,
     average_hr DOUBLE, max_hr DOUBLE, calories DOUBLE,
-    average_run_cadence DOUBLE, max_run_cadence DOUBLE, vo2_max DOUBLE,
+    average_run_cadence DOUBLE, max_run_cadence DOUBLE, stride_length_mm DOUBLE,
+    aerobic_training_effect DOUBLE, activity_training_load DOUBLE, vo2_max DOUBLE,
     device_id VARCHAR, gear_id VARCHAR, source_payload JSON NOT NULL,
     source_run_id VARCHAR NOT NULL, loaded_at TIMESTAMPTZ NOT NULL
 );
+ALTER TABLE core.activities ADD COLUMN IF NOT EXISTS stride_length_mm DOUBLE;
+ALTER TABLE core.activities ADD COLUMN IF NOT EXISTS aerobic_training_effect DOUBLE;
+ALTER TABLE core.activities ADD COLUMN IF NOT EXISTS activity_training_load DOUBLE;
+
 CREATE TABLE IF NOT EXISTS core.activity_workouts (
     activity_id VARCHAR NOT NULL, workout_index INTEGER NOT NULL,
     workout_payload JSON NOT NULL, source_run_id VARCHAR NOT NULL,
@@ -155,7 +160,8 @@ CREATE OR REPLACE VIEW mart.running_performance AS
 SELECT activity_id, activity_date, activity_name, activity_type,
        distance_m, duration_s,
        CASE WHEN distance_m > 0 THEN duration_s / (distance_m / 1000.0) END AS pace_sec_per_km,
-       average_speed_m_s, average_hr, max_hr, average_run_cadence, vo2_max,
+       average_speed_m_s, average_hr, max_hr, average_run_cadence, max_run_cadence,
+       stride_length_mm, aerobic_training_effect, activity_training_load, vo2_max,
        device_id, gear_id
 FROM core.activities
 WHERE lower(coalesce(activity_type, '')) LIKE '%run%';
