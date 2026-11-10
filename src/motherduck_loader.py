@@ -142,6 +142,17 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
         """, raw_rows)
 
         if source_name == "activities":
+            # Collapse legacy hash-keyed copies to the Garmin activityId key.
+            # CORE is naturally unique by activity_id.
+            con.execute("""
+                DELETE FROM raw.garmin_payloads
+                WHERE source_name = 'activities'
+                  AND record_key <> coalesce(
+                      json_extract_string(payload, '$.summary.activityId'),
+                      json_extract_string(payload, '$.activityId'),
+                      record_key
+                  )
+            """)
             core_rows = []
             for index, record in enumerate(rows):
                 s = _summary(record)
