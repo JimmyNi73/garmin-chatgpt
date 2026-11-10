@@ -228,6 +228,8 @@ def main() -> None:
     mapped_activities = sum(1 for row in activities if isinstance(row.get("gear"), dict)
                             and row["gear"].get("gear_id") is not None)
     weight_rows = len(datasets.get("weight_measurements", []))
+    if weight_rows == 0:
+        raise RuntimeError("Garmin returned no weight measurements in the selected test windows; refusing an incomplete load")
     LOG.info("Preflight passed: %d activities, %d with gear, %d Garmin gear items, "
              "%d weight records, %d Garmin requests, sources=%s",
              len(activities), mapped_activities, len(gear_registry), weight_rows,
