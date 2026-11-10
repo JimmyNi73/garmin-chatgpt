@@ -43,37 +43,70 @@ SELECT metric_source, record_key, metric_date, metric_value,
        source_payload, source_run_id, loaded_at
 FROM core.daily_metrics;
 
--- Garmin weight_measurements contains monthly windows in milliseconds since epoch.
--- Values are stored in grams; expose kg and the window start/end explicitly.
+-- Garmin weight_measurements may expose weight as a scalar (grams) or as the
+-- nested weight object used by Garmin's biometrics export. Keep individual
+-- same-day measurements distinct using the stable record_key.
 CREATE OR REPLACE VIEW core.weight AS
+WITH parsed AS (
+    SELECT *,
+        coalesce(
+            try_cast(json_extract_string(metric_value, '$.weight') AS DOUBLE),
+            try_cast(json_extract_string(metric_value, '$.weight.weight') AS DOUBLE),
+            try_cast(json_extract_string(metric_value, '$.weightInGrams') AS DOUBLE),
+            try_cast(json_extract_string(metric_value, '$.weight.weightInGrams') AS DOUBLE)
+        ) AS weight_grams,
+        coalesce(
+            json_extract_string(metric_value, '$.timestampGMT'),
+            json_extract_string(metric_value, '$.weight.timestampGMT')
+        ) AS weight_timestamp
+    FROM core.daily_metrics
+    WHERE lower(metric_source) LIKE '%weight%'
+)
 SELECT
     record_key,
-    coalesce(
-        metric_date,
-        try_cast(to_timestamp(try_cast(json_extract_string(metric_value, '$.from') AS BIGINT) / 1000.0) AS DATE)
-    ) AS measurement_date,
+    coalesce(metric_date,
+             try_cast(try_cast(weight_timestamp AS TIMESTAMPTZ) AS DATE),
+             try_cast(json_extract_string(metric_value, '$.calendarDate') AS DATE)) AS measurement_date,
     try_cast(json_extract_string(metric_value, '$.from') AS BIGINT) AS period_start_ms,
     try_cast(json_extract_string(metric_value, '$.until') AS BIGINT) AS period_end_ms,
+    try_cast(weight_timestamp AS TIMESTAMPTZ) AS measurement_timestamp,
     CASE
-        WHEN try_cast(json_extract_string(metric_value, '$.weight') AS DOUBLE) IS NOT NULL
-            THEN try_cast(json_extract_string(metric_value, '$.weight') AS DOUBLE) / 1000.0
-        WHEN try_cast(json_extract_string(metric_value, '$.weightInGrams') AS DOUBLE) IS NOT NULL
-            THEN try_cast(json_extract_string(metric_value, '$.weightInGrams') AS DOUBLE) / 1000.0
-        ELSE try_cast(json_extract_string(metric_value, '$.weightKg') AS DOUBLE)
+        WHEN weight_grams IS NOT NULL THEN weight_grams / 1000.0
+        ELSE coalesce(
+            try_cast(json_extract_string(metric_value, '$.weightKg') AS DOUBLE),
+            try_cast(json_extract_string(metric_value, '$.weight.weightKg') AS DOUBLE)
+        )
     END AS weight_kg,
-    try_cast(json_extract_string(metric_value, '$.bmi') AS DOUBLE) AS bmi,
-    try_cast(json_extract_string(metric_value, '$.bodyFat') AS DOUBLE) AS body_fat_pct,
-    try_cast(json_extract_string(metric_value, '$.bodyWater') AS DOUBLE) AS body_water_pct,
-    try_cast(json_extract_string(metric_value, '$.muscleMass') AS DOUBLE) / 1000.0 AS muscle_mass_kg,
-    try_cast(json_extract_string(metric_value, '$.boneMass') AS DOUBLE) / 1000.0 AS bone_mass_kg,
-    try_cast(json_extract_string(metric_value, '$.visceralFat') AS DOUBLE) AS visceral_fat,
+    coalesce(
+        try_cast(json_extract_string(metric_value, '$.bmi') AS DOUBLE),
+        try_cast(json_extract_string(metric_value, '$.weight.bmi') AS DOUBLE)
+    ) AS bmi,
+    coalesce(
+        try_cast(json_extract_string(metric_value, '$.bodyFat') AS DOUBLE),
+        try_cast(json_extract_string(metric_value, '$.weight.bodyFat') AS DOUBLE)
+    ) AS body_fat_pct,
+    coalesce(
+        try_cast(json_extract_string(metric_value, '$.bodyWater') AS DOUBLE),
+        try_cast(json_extract_string(metric_value, '$.weight.bodyWater') AS DOUBLE)
+    ) AS body_water_pct,
+    coalesce(
+        try_cast(json_extract_string(metric_value, '$.muscleMass') AS DOUBLE),
+        try_cast(json_extract_string(metric_value, '$.weight.muscleMass') AS DOUBLE)
+    ) / 1000.0 AS muscle_mass_kg,
+    coalesce(
+        try_cast(json_extract_string(metric_value, '$.boneMass') AS DOUBLE),
+        try_cast(json_extract_string(metric_value, '$.weight.boneMass') AS DOUBLE)
+    ) / 1000.0 AS bone_mass_kg,
+    coalesce(
+        try_cast(json_extract_string(metric_value, '$.visceralFat') AS DOUBLE),
+        try_cast(json_extract_string(metric_value, '$.weight.visceralFat') AS DOUBLE)
+    ) AS visceral_fat,
     metric_value AS source_value,
     source_payload
-FROM core.daily_metrics
-WHERE lower(metric_source) LIKE '%weight%'
-  AND (json_extract(metric_value, '$.weight') IS NOT NULL
-       OR json_extract(metric_value, '$.weightInGrams') IS NOT NULL
-       OR json_extract(metric_value, '$.weightKg') IS NOT NULL);
+FROM parsed
+WHERE weight_grams IS NOT NULL
+   OR json_extract(metric_value, '$.weightKg') IS NOT NULL
+   OR json_extract(metric_value, '$.weight.weightKg') IS NOT NULL;
 
 CREATE OR REPLACE VIEW core.sleep AS
 SELECT record_key, metric_date AS sleep_date, metric_source AS sleep_source,

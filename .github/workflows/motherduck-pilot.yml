@@ -1,20 +1,10 @@
-name: Garmin MotherDuck Test
+name: Garmin MotherDuck Test (manual only)
 
 on:
-  push:
-    branches:
-      - feature/motherduck-service-db
-    paths:
-      - "src/motherduck_loader.py"
-      - "src/motherduck_export.py"
-      - "src/garmin_export.py"
-      - "sql/garmin_motherduck_model.sql"
-      - "tests/**"
-      - ".github/workflows/motherduck-pilot.yml"
   workflow_dispatch:
     inputs:
       confirm_test:
-        description: "Type RUN to confirm the record-level Garmin test"
+        description: "Type RUN to confirm the final Garmin-only MotherDuck test"
         required: true
         type: string
 

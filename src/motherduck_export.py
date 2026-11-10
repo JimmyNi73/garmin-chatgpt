@@ -22,7 +22,7 @@ from motherduck_loader import connect, ensure_schema, load_records
 
 LOG = logging.getLogger("motherduck_export")
 TZ = ZoneInfo("Europe/Stockholm")
-HISTORIC_MONTHS = ("2011-08", "2022-10")
+HISTORIC_MONTHS = ("2021-08", "2023-08")
 
 
 def month_bounds(month: str) -> tuple[date, date]:

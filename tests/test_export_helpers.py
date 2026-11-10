@@ -88,6 +88,31 @@ class ExportHelperTests(unittest.TestCase):
             self.assertEqual(indexed["2026-11-07"]["value"], 22)
 
 
+    def test_optional_daily_treats_garmin_400_as_unavailable(self):
+        class Http400CLI:
+            def run(self, label, *args):
+                raise RuntimeError("HTTP 400 Bad Request")
+
+        unavailable = []
+        ok, value = ge.optional_daily(Http400CLI(), unavailable, "steps 2011-08-01",
+                                      "steps", "--date", "2011-08-01")
+        self.assertTrue(ok)
+        self.assertIsNone(value)
+        self.assertEqual(len(unavailable), 1)
+        self.assertIn("HTTP 400", unavailable[0]["reason"])
+
+    def test_optional_daily_recognizes_http_404(self):
+        class Http404CLI:
+            def run(self, label, *args):
+                raise RuntimeError("HTTP 404 Not Found")
+
+        unavailable = []
+        ok, value = ge.optional_daily(Http404CLI(), unavailable, "sleep 2021-08-01",
+                                      "sleep", "--date", "2021-08-01")
+        self.assertTrue(ok)
+        self.assertIsNone(value)
+        self.assertEqual(unavailable, [])
+
     def test_gear_only_backfill_preserves_non_gear_data(self):
         class FakeResponse:
             def __init__(self, content):

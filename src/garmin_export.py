@@ -667,7 +667,7 @@ def optional_daily(cli: GarminCLI, unavailable: list[dict[str, str]],
             return True, cli.run(label, *args)
         except Exception as exc:
             message = str(exc)
-            if re.search(r"HTTP\\s*5\\d\\d|timed out|timeout|temporar", message, re.I):
+            if re.search(r"HTTP\s*5\d\d|timed out|timeout|temporar", message, re.I):
                 if attempt < 3:
                     wait = 5 * attempt
                     LOG.warning("%s failed attempt %d/3; retrying in %d sec: %s",
@@ -678,8 +678,12 @@ def optional_daily(cli: GarminCLI, unavailable: list[dict[str, str]],
                             label, message)
                 unavailable.append({"source": label, "reason": "failed after 3 attempts: " + message})
                 return True, None
-            if re.search(r"\\b404\\b|no data available|no data for (?:this )?(?:date|period)", message, re.I):
+            if re.search(r"\b404\b|no data available|no data for (?:this )?(?:date|period)", message, re.I):
                 LOG.info("%s: no data available", label)
+                return True, None
+            if re.search(r"HTTP\s*400", message, re.I):
+                LOG.info("%s: Garmin reports no historical records for this date", label)
+                unavailable.append({"source": label, "reason": "Garmin HTTP 400; no records returned"})
                 return True, None
             raise
 
