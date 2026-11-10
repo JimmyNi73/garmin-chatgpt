@@ -129,6 +129,9 @@ class ExportHelperTests(unittest.TestCase):
 
         dbx = FakeDropbox()
         original_output = ge.OUTPUT_DIR
+        original_write_mode = ge.WriteMode
+        # Keep this legacy Dropbox-helper unit test independent of the SDK.
+        ge.WriteMode = SimpleNamespace(overwrite="overwrite")
         with tempfile.TemporaryDirectory() as tmpdir:
             ge.OUTPUT_DIR = Path(tmpdir)
             try:
@@ -139,6 +142,7 @@ class ExportHelperTests(unittest.TestCase):
                 )
             finally:
                 ge.OUTPUT_DIR = original_output
+                ge.WriteMode = original_write_mode
 
         self.assertEqual((updated, activities, links), (2, 2, 1))
         historical = dbx.files["/History/garmin_history_2011-01.json"]
