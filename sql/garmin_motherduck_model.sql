@@ -46,13 +46,15 @@ FROM src;
 -- Preserve workout structures independently; activity id remains the parent key.
 CREATE OR REPLACE VIEW core.activity_workouts AS
 SELECT
-    coalesce(json_extract_string(payload, '$.summary.activityId'),
-             json_extract_string(payload, '$.activityId')) AS activity_id,
-    unnest(json_extract(payload, '$.workouts')) AS workout_payload,
-    source_run_id, loaded_at
-FROM raw.garmin_payloads
-WHERE source_name = 'activities'
-  AND json_type(json_extract(payload, '$.workouts')) = 'ARRAY';
+    coalesce(json_extract_string(p.payload, '$.summary.activityId'),
+             json_extract_string(p.payload, '$.activityId')) AS activity_id,
+    w.key AS workout_index,
+    w.value AS workout_payload,
+    p.source_run_id, p.loaded_at
+FROM raw.garmin_payloads AS p,
+     LATERAL json_each(p.payload, '$.workouts') AS w
+WHERE p.source_name = 'activities'
+  AND json_type(json_extract(p.payload, '$.workouts')) = 'ARRAY';
 
 -- Generic source-grain health records. This avoids multiplying daily measures
 -- when joining them to multiple activities on the same day.
