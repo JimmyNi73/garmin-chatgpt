@@ -186,7 +186,16 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
                     _as_float(s.get("averageHR")), _as_float(s.get("maxHR")),
                     _as_float(s.get("calories")), _as_float(s.get("averageRunCadence")),
                     _as_float(s.get("maxRunCadence")), _as_float(s.get("vO2MaxValue")),
-                    str(s.get("deviceId")) if s.get("deviceId") is not None else None,
+                    str(_first(s.get("deviceId"),
+                        (record.get("device") or {}).get("device_id")
+                        if isinstance(record.get("device"), dict) else None,
+                        (record.get("detail") or {}).get("deviceId")
+                        if isinstance(record.get("detail"), dict) else None))
+                    if _first(s.get("deviceId"),
+                        (record.get("device") or {}).get("device_id")
+                        if isinstance(record.get("device"), dict) else None,
+                        (record.get("detail") or {}).get("deviceId")
+                        if isinstance(record.get("detail"), dict) else None) is not None else None,
                     str(gear_id) if gear_id is not None else None,
                     _json(record), source_run_id, loaded_at))
             con.executemany("""
