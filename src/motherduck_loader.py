@@ -28,7 +28,7 @@ def stable_record_key(source_name: str, record: dict[str, Any], index: int) -> s
 def connect(database: str | None = None) -> duckdb.DuckDBPyConnection:
     """Create the target database if needed, then connect to it.
 
-    The account-level connection uses the GitHub service-account token.
+    The account-level connection uses the identity represented by MOTHERDUCK_TOKEN.
     It never attaches to or modifies the personal 'garmin' database.
     """
     if not os.getenv("MOTHERDUCK_TOKEN"):
