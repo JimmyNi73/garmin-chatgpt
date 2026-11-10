@@ -1,8 +1,4 @@
-"""Small, idempotent RAW loader for Garmin JSON payloads into MotherDuck.
-
-The module deliberately separates extraction from loading. Extraction is supplied
-by the pilot runner; this module never reads Dropbox archives or historical files.
-"""
+"""Idempotent RAW loader for complete Garmin monthly payloads in MotherDuck."""
 from __future__ import annotations
 
 import hashlib
@@ -16,9 +12,13 @@ import duckdb
 
 
 def stable_record_key(source_name: str, record: dict[str, Any], index: int) -> str:
-    """Prefer stable Garmin identifiers; otherwise hash canonical JSON."""
-    for key in ("activityId", "activity_id", "id"):
-        value = record.get(key)
+    """Prefer stable Garmin identifiers, including nested activity summaries."""
+    candidates = [
+        record.get("activityId"), record.get("activity_id"), record.get("id"),
+        (record.get("summary") or {}).get("activityId")
+        if isinstance(record.get("summary"), dict) else None,
+    ]
+    for value in candidates:
         if value is not None:
             return str(value)
     canonical = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -26,17 +26,11 @@ def stable_record_key(source_name: str, record: dict[str, Any], index: int) -> s
 
 
 def connect(database: str | None = None) -> duckdb.DuckDBPyConnection:
-    """Create the target database if needed, then connect to it.
-
-    The account-level connection uses the identity represented by MOTHERDUCK_TOKEN.
-    It never attaches to or modifies the personal 'garmin' database.
-    """
     if not os.getenv("MOTHERDUCK_TOKEN"):
         raise RuntimeError("MOTHERDUCK_TOKEN is not configured")
     target = database or os.getenv("MOTHERDUCK_DATABASE", "garmin_github")
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", target):
         raise ValueError(f"Invalid MotherDuck database identifier: {target!r}")
-
     admin = duckdb.connect("md:")
     try:
         admin.execute(f"CREATE DATABASE IF NOT EXISTS {target}")
@@ -61,7 +55,6 @@ def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
 
 
 def event_date(record: dict[str, Any]) -> str | None:
-    """Resolve dates from flat Garmin records and nested activity summaries."""
     for key in ("calendarDate", "date", "startTimeLocal", "startTimeGMT",
                 "beginTimestamp", "startTimeGmt"):
         value = record.get(key)
@@ -81,22 +74,15 @@ def event_date(record: dict[str, Any]) -> str | None:
     return None
 
 
-def load_records(
-    con: duckdb.DuckDBPyConnection,
-    source_name: str,
-    records: Iterable[dict[str, Any]],
-    source_run_id: str,
-) -> int:
-    """Transactional upsert; re-running the same window cannot create duplicates."""
+def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
+                 records: Iterable[dict[str, Any]], source_run_id: str) -> int:
     rows = []
     loaded_at = datetime.now(timezone.utc)
     for index, record in enumerate(records):
-        key = stable_record_key(source_name, record, index)
-        rows.append((
-            source_name, key, event_date(record),
-            json.dumps(record, ensure_ascii=False, separators=(",", ":")),
-            source_run_id, loaded_at,
-        ))
+        rows.append((source_name, stable_record_key(source_name, record, index),
+                     event_date(record),
+                     json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+                     source_run_id, loaded_at))
     if not rows:
         return 0
     con.execute("BEGIN TRANSACTION")
@@ -105,13 +91,30 @@ def load_records(
             INSERT INTO raw.garmin_payloads
             VALUES (?, ?, TRY_CAST(? AS DATE), ?::JSON, ?, ?)
             ON CONFLICT (source_name, record_key) DO UPDATE SET
-                event_date = excluded.event_date,
-                payload = excluded.payload,
-                source_run_id = excluded.source_run_id,
-                loaded_at = excluded.loaded_at
+                event_date = excluded.event_date, payload = excluded.payload,
+                source_run_id = excluded.source_run_id, loaded_at = excluded.loaded_at
         """, rows)
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")
         raise
     return len(rows)
+
+
+def load_month_payload(con: duckdb.DuckDBPyConnection, month: str,
+                       payload: dict[str, Any], source_run_id: str) -> int:
+    """Store the unmodified Dropbox-equivalent monthly document as one RAW row."""
+    if not re.fullmatch(r"\\d{4}-\\d{2}", month):
+        raise ValueError(f"Invalid month key: {month}")
+    if payload.get("metadata", {}).get("export_status") != "complete":
+        raise RuntimeError(f"Refusing to load incomplete month {month}")
+    activities = payload.get("activities")
+    if not isinstance(activities, list):
+        raise RuntimeError(f"Month {month} has no activities array")
+    ids = [(row.get("summary") or {}).get("activityId")
+           for row in activities if isinstance(row, dict)]
+    if len(ids) != len(activities) or any(value is None for value in ids) or len(ids) != len(set(map(str, ids))):
+        raise RuntimeError(f"Month {month} has missing or duplicate activity IDs")
+    return load_records(con, "monthly_exports", [{
+        "calendarDate": month + "-01", "payload": payload
+    }], source_run_id)
