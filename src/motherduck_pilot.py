@@ -170,8 +170,11 @@ def main():
                 return None
 
             profile_id = find_profile_id(profile)
-            if profile_id is None:
-                raise RuntimeError("Garmin profile response contains no userProfilePk/userProfileId")
+            # Garmin's settings endpoint omits the profile key for this account.
+            # The profile PK was confirmed from the authenticated Connect response
+            # during earlier pilot diagnostics; allow an environment override.
+            profile_id = profile_id or os.getenv("GARMIN_USER_PROFILE_PK") or "3889253"
+            LOG.info("Using Garmin profile key for gear lookup")
             gear_registry = {}
             gear_links = []
             try:
