@@ -42,6 +42,8 @@ def records_from_indexed(value):
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    if not os.getenv("MOTHERDUCK_TOKEN"):
+        raise RuntimeError("GitHub secret MOTHERDUCK_TOKEN is missing; refusing to call Garmin before destination is ready")
     if not os.getenv("GARMIN_PERSONAL_API_KEY"):
         raise RuntimeError("GARMIN_PERSONAL_API_KEY is missing")
     days = int(os.getenv("PILOT_DAYS", "14"))
