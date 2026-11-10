@@ -150,7 +150,12 @@ def collect_archive(dbx: Any) -> tuple[dict[str, list[dict[str, Any]]], dict[str
             continue
         unique: dict[str, dict[str, Any]] = {}
         for row in rows:
-            canonical = json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+            # The same daily sample can appear in both range_data and by_date.
+            # Collapse only byte-equivalent date/value pairs, not distinct samples.
+            canonical = json.dumps(
+                {"calendarDate": row.get("calendarDate"),
+                 "source_payload": row.get("source_payload")},
+                sort_keys=True, ensure_ascii=False, separators=(",", ":"))
             unique[canonical] = row
         datasets[source] = list(unique.values())
 
