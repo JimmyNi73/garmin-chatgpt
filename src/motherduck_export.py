@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from garmin_export import (
     GarminCLI, activity_records, date_index, device_registry,
-    fetch_activities, fetch_month_health,
+    fetch_activities, fetch_month_health, fetch_gear_data, enrich_gear_records,
 )
 from motherduck_loader import connect, ensure_schema, load_records
 
@@ -131,8 +131,20 @@ def main() -> None:
     expected_ids = set(summaries_by_id)
     if len(detail_ids) != len(set(detail_ids)) or set(detail_ids) != expected_ids:
         raise RuntimeError("Activity detail preflight failed; refusing all database writes")
+    # Fetch gear registry and activity assignments directly from Garmin Personal API.
+    gear_registry, activity_to_gear = fetch_gear_data(cli)
+    if not gear_registry:
+        raise RuntimeError("Garmin returned an empty gear registry; refusing incomplete test")
+    enrich_gear_records(activities, gear_registry, activity_to_gear)
+    unknown_gear_ids = set(activity_to_gear.values()) - set(gear_registry)
+    if unknown_gear_ids:
+        raise RuntimeError(f"Garmin gear links reference unknown gear IDs: {sorted(unknown_gear_ids)}")
+
     datasets["activities"] = activities
     datasets["devices"] = device_registry(activities)
+    datasets["gear_registry"] = [
+        {"gear_id": gear_id, **gear} for gear_id, gear in sorted(gear_registry.items())
+    ]
 
     # VO2 is loaded only when present in documented activity summaries.
     vo2 = []
@@ -156,9 +168,13 @@ def main() -> None:
             unique[key] = row
         datasets[source] = list(unique.values())
 
-    LOG.info("Preflight passed: %d activities, %d Garmin requests, sources=%s",
-             len(activities), cli.request_count,
-             {name: len(rows) for name, rows in datasets.items()})
+    mapped_activities = sum(1 for row in activities if isinstance(row.get("gear"), dict)
+                            and row["gear"].get("gear_id") is not None)
+    weight_rows = len(datasets.get("weight_measurements", []))
+    LOG.info("Preflight passed: %d activities, %d with gear, %d Garmin gear items, "
+             "%d weight records, %d Garmin requests, sources=%s",
+             len(activities), mapped_activities, len(gear_registry), weight_rows,
+             cli.request_count, {name: len(rows) for name, rows in datasets.items()})
 
     # No writes occur before all Garmin retrieval and activity completeness checks pass.
     con = connect()

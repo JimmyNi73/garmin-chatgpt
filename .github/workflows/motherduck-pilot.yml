@@ -7,7 +7,7 @@ on:
     paths:
       - "src/motherduck_loader.py"
       - "src/motherduck_export.py"
-      - "src/motherduck_backfill.py"
+      - "src/garmin_export.py"
       - "sql/garmin_motherduck_model.sql"
       - "tests/**"
       - ".github/workflows/motherduck-pilot.yml"
@@ -40,22 +40,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: python -m pip install --upgrade garmin-connect-personal-api-python dropbox duckdb==1.5.6
+        run: python -m pip install --upgrade garmin-connect-personal-api-python duckdb==1.5.6
 
       - name: Validate Python syntax
-        run: python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_export.py src/motherduck_backfill.py
+        run: python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_export.py
 
       - name: Run exporter unit tests
         run: python -m unittest discover -s tests -v
-
-      - name: Backfill complete Dropbox history into relational CORE
-        env:
-          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
-          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
-          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
-          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
-          MOTHERDUCK_DATABASE: garmin_github
-        run: python src/motherduck_backfill.py
 
       - name: Cross-check selected historical periods and refresh recent Garmin data
         env:

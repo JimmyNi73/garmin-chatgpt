@@ -15,8 +15,12 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import dropbox
-from dropbox.files import WriteMode
+try:
+    import dropbox
+    from dropbox.files import WriteMode
+except ImportError:  # MotherDuck-only runs do not require the Dropbox SDK.
+    dropbox = None
+    WriteMode = None
 from garmin_personal_api.api_keys import resolve_api_key
 from garmin_personal_api.auth import PersonalApiAuthenticator
 from garmin_personal_api.client import GarminPersonalApiClient
@@ -262,6 +266,8 @@ class GarminCLI:
 
 
 def dbx_client() -> dropbox.Dropbox:
+    if dropbox is None:
+        raise RuntimeError("Dropbox SDK is not installed; this execution path must not use Dropbox")
     required = ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN")
     missing = [k for k in required if not os.getenv(k)]
     if missing:
@@ -301,6 +307,8 @@ def read_dropbox(dbx: dropbox.Dropbox, path: str) -> dict[str, Any] | None:
 
 
 def upload_json(dbx: dropbox.Dropbox, path: str, value: dict[str, Any]) -> None:
+    if WriteMode is None:
+        raise RuntimeError("Dropbox SDK is not installed; cannot upload JSON")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     local = OUTPUT_DIR / path.rsplit("/", 1)[-1]
     local.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n",
