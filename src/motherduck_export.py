@@ -1,4 +1,4 @@
-"""Controlled record-level Garmin -> MotherDuck test.
+"""Full-history Garmin -> MotherDuck ingestion.
 
 Uses the same Garmin Personal API client and detail validation as garmin_export.py.
 No Dropbox reads/writes, month-partitioned database storage, or destructive
@@ -265,7 +265,7 @@ def main() -> None:
             SELECT source_name, count(*) FROM raw.garmin_payloads
             GROUP BY source_name ORDER BY source_name
         """).fetchall()
-        LOG.info("MotherDuck test succeeded: run=%s loaded=%d counts=%s", run_id, total, counts)
+        LOG.info("Garmin full-history ingestion succeeded: run=%s loaded=%d counts=%s", run_id, total, counts)
     finally:
         con.close()
 
