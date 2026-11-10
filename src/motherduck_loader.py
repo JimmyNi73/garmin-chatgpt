@@ -12,7 +12,7 @@ import duckdb
 
 
 def stable_record_key(source_name: str, record: dict[str, Any], index: int) -> str:
-    """Prefer stable Garmin identifiers, including nested activity summaries."""
+    """Prefer stable Garmin identifiers, including nested activity summaries and date-stamped records."""
     candidates = [
         record.get("activityId"), record.get("activity_id"), record.get("id"),
         (record.get("summary") or {}).get("activityId")
@@ -100,35 +100,3 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
         raise
     return len(rows)
 
-
-def load_month_payload(con: duckdb.DuckDBPyConnection, month: str,
-                       payload: dict[str, Any], source_run_id: str) -> int:
-    """Store the unmodified Dropbox-equivalent monthly document as one RAW row."""
-    if not re.fullmatch(r"\d{4}-\d{2}", month):
-        raise ValueError(f"Invalid month key: {month}")
-    if payload.get("metadata", {}).get("export_status") != "complete":
-        raise RuntimeError(f"Refusing to load incomplete month {month}")
-    activities = payload.get("activities")
-    if not isinstance(activities, list):
-        raise RuntimeError(f"Month {month} has no activities array")
-    ids = [(row.get("summary") or {}).get("activityId")
-           for row in activities if isinstance(row, dict)]
-    if len(ids) != len(activities) or any(value is None for value in ids) or len(ids) != len(set(map(str, ids))):
-        raise RuntimeError(f"Month {month} has missing or duplicate activity IDs")
-    loaded_at = datetime.now(timezone.utc)
-    con.execute("BEGIN TRANSACTION")
-    try:
-        con.execute("""
-            INSERT INTO raw.garmin_payloads
-            VALUES ('monthly_exports', ?, TRY_CAST(? AS DATE), ?::JSON, ?, ?)
-            ON CONFLICT (source_name, record_key) DO UPDATE SET
-                event_date = excluded.event_date, payload = excluded.payload,
-                source_run_id = excluded.source_run_id, loaded_at = excluded.loaded_at
-        """, [month, month + "-01",
-              json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-              source_run_id, loaded_at])
-        con.execute("COMMIT")
-    except Exception:
-        con.execute("ROLLBACK")
-        raise
-    return 1
