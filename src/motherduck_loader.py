@@ -16,12 +16,14 @@ import duckdb
 
 def stable_record_key(source_name: str, record: dict[str, Any], index: int) -> str:
     """Prefer stable Garmin identifiers; otherwise hash canonical JSON."""
-    for key in ("activityId", "activity_id", "id", "calendarDate", "date"):
+    for key in ("activityId", "activity_id", "id"):
         value = record.get(key)
         if value is not None:
             return str(value)
+    # Some Garmin series contain multiple snapshots per calendar day. Hash the
+    # complete canonical record rather than collapsing them to one date key.
     canonical = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(f"{source_name}:{canonical}:{index}".encode()).hexdigest()
+    return hashlib.sha256(f"{source_name}:{canonical}".encode()).hexdigest()
 
 
 def connect(database: str | None = None) -> duckdb.DuckDBPyConnection:
