@@ -1,0 +1,36 @@
+name: Remove unused service-account database
+
+on:
+  push:
+    branches:
+      - maintenance/remove-unused-my-db
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install MotherDuck client
+        run: python -m pip install 'duckdb==1.5.6'
+      - name: Drop only my_db under GithubGarmin
+        env:
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+        run: |
+          python - <<'PY'
+          import duckdb, os
+          assert os.environ.get("MOTHERDUCK_TOKEN"), "Missing service-account token"
+          con = duckdb.connect("md:")
+          try:
+              # Select the retained service-account database so my_db is not the active DB.
+              con.execute("USE garmin_github")
+              print("Connected with GithubGarmin token; current database: garmin_github")
+              con.execute("DROP DATABASE IF EXISTS my_db")
+              print("SUCCESS: dropped my_db. garmin_github was not modified.")
+          finally:
+              con.close()
+          PY
