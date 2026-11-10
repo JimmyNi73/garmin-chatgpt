@@ -41,7 +41,7 @@ jobs:
       - name: Run exporter unit tests
         run: python -m unittest discover -s tests -v
 
-      - name: Cross-check selected historical periods and refresh recent Garmin data
+      - name: Load full Garmin history directly into MotherDuck
         env:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
