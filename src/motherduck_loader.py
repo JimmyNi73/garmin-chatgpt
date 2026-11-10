@@ -128,6 +128,23 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
+def _bulk_insert(con: duckdb.DuckDBPyConnection, table: str, rows: list[tuple],
+                 value_template: str, conflict_clause: str = "",
+                 chunk_size: int = 200) -> None:
+    """Send bounded multi-row INSERT statements instead of one network round-trip per row."""
+    if not rows:
+        return
+    tuple_sql = f"({value_template})"
+    for offset in range(0, len(rows), chunk_size):
+        batch = rows[offset:offset + chunk_size]
+        values_sql = ", ".join([tuple_sql] * len(batch))
+        params = [value for row in batch for value in row]
+        con.execute(
+            f"INSERT INTO {table} VALUES {values_sql} {conflict_clause}",
+            params,
+        )
+
+
 def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
                  records: Iterable[dict[str, Any]], source_run_id: str) -> int:
     rows = list(records)
@@ -141,13 +158,11 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
 
     con.execute("BEGIN TRANSACTION")
     try:
-        con.executemany("""
-            INSERT INTO raw.garmin_payloads
-            VALUES (?, ?, TRY_CAST(? AS DATE), ?::JSON, ?, ?)
-            ON CONFLICT (source_name, record_key) DO UPDATE SET
+        _bulk_insert(con, "raw.garmin_payloads", raw_rows,
+            "?, ?, TRY_CAST(? AS DATE), ?::JSON, ?, ?",
+            """ON CONFLICT (source_name, record_key) DO UPDATE SET
                 event_date=excluded.event_date, payload=excluded.payload,
-                source_run_id=excluded.source_run_id, loaded_at=excluded.loaded_at
-        """, raw_rows)
+                source_run_id=excluded.source_run_id, loaded_at=excluded.loaded_at""")
 
         if source_name == "activities":
             # Collapse legacy hash-keyed copies to the Garmin activityId key.
@@ -198,9 +213,9 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
                         if isinstance(record.get("detail"), dict) else None) is not None else None,
                     str(gear_id) if gear_id is not None else None,
                     _json(record), source_run_id, loaded_at))
-            con.executemany("""
-                INSERT INTO core.activities VALUES (?,TRY_CAST(? AS DATE),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?::JSON,?,?)
-                ON CONFLICT (activity_id) DO UPDATE SET
+            _bulk_insert(con, "core.activities", core_rows,
+                "?,TRY_CAST(? AS DATE),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?::JSON,?,?",
+                """ON CONFLICT (activity_id) DO UPDATE SET
                     activity_date=excluded.activity_date, activity_type=excluded.activity_type,
                     activity_name=excluded.activity_name, distance_m=excluded.distance_m,
                     duration_s=excluded.duration_s, elapsed_duration_s=excluded.elapsed_duration_s,
@@ -210,8 +225,7 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
                     max_run_cadence=excluded.max_run_cadence, vo2_max=excluded.vo2_max,
                     device_id=excluded.device_id, gear_id=excluded.gear_id,
                     source_payload=excluded.source_payload, source_run_id=excluded.source_run_id,
-                    loaded_at=excluded.loaded_at
-            """, core_rows)
+                    loaded_at=excluded.loaded_at""")
             workout_rows = []
             for record in rows:
                 summary = _summary(record)
@@ -223,12 +237,11 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
                         workout_rows.append((str(activity_id), workout_index, _json(workout),
                                              source_run_id, loaded_at))
             if workout_rows:
-                con.executemany("""
-                    INSERT INTO core.activity_workouts VALUES (?, ?, ?::JSON, ?, ?)
-                    ON CONFLICT (activity_id, workout_index) DO UPDATE SET
+                _bulk_insert(con, "core.activity_workouts", workout_rows,
+                    "?, ?, ?::JSON, ?, ?",
+                    """ON CONFLICT (activity_id, workout_index) DO UPDATE SET
                         workout_payload=excluded.workout_payload,
-                        source_run_id=excluded.source_run_id, loaded_at=excluded.loaded_at
-                """, workout_rows)
+                        source_run_id=excluded.source_run_id, loaded_at=excluded.loaded_at""")
         elif source_name == "devices":
             device_rows = []
             for record in rows:
@@ -238,12 +251,10 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
                 device_rows.append((str(device_id), _first(record.get("device_model"),
                     record.get("deviceModel"), record.get("model")), _json(record), source_run_id, loaded_at))
             if device_rows:
-                con.executemany("""
-                    INSERT INTO core.devices VALUES (?,?,?,?,?)
-                    ON CONFLICT (device_id) DO UPDATE SET device_model=excluded.device_model,
+                _bulk_insert(con, "core.devices", device_rows, "?, ?, ?::JSON, ?, ?",
+                    """ON CONFLICT (device_id) DO UPDATE SET device_model=excluded.device_model,
                     source_payload=excluded.source_payload, source_run_id=excluded.source_run_id,
-                    loaded_at=excluded.loaded_at
-                """, device_rows)
+                    loaded_at=excluded.loaded_at""")
         elif source_name in ("gear_registry", "gear"):
             gear_rows = []
             for record in rows:
@@ -253,12 +264,10 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
                 gear_rows.append((str(gear_id), _first(record.get("customMakeModel"),
                     record.get("name"), record.get("displayName")), _json(record), source_run_id, loaded_at))
             if gear_rows:
-                con.executemany("""
-                    INSERT INTO core.gear VALUES (?,?,?,?,?)
-                    ON CONFLICT (gear_id) DO UPDATE SET gear_name=excluded.gear_name,
+                _bulk_insert(con, "core.gear", gear_rows, "?, ?, ?::JSON, ?, ?",
+                    """ON CONFLICT (gear_id) DO UPDATE SET gear_name=excluded.gear_name,
                     source_payload=excluded.source_payload, source_run_id=excluded.source_run_id,
-                    loaded_at=excluded.loaded_at
-                """, gear_rows)
+                    loaded_at=excluded.loaded_at""")
         else:
             metric_rows = []
             for index, record in enumerate(rows):
@@ -266,13 +275,12 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
                 value = record.get("source_payload", record)
                 metric_rows.append((source_name, key, event_date(record), _json(value),
                                     _json(record), source_run_id, loaded_at))
-            con.executemany("""
-                INSERT INTO core.daily_metrics VALUES (?, ?, TRY_CAST(? AS DATE), ?::JSON, ?::JSON, ?, ?)
-                ON CONFLICT (metric_source, record_key) DO UPDATE SET
+            _bulk_insert(con, "core.daily_metrics", metric_rows,
+                "?, ?, TRY_CAST(? AS DATE), ?::JSON, ?::JSON, ?, ?",
+                """ON CONFLICT (metric_source, record_key) DO UPDATE SET
                     metric_date=excluded.metric_date, metric_value=excluded.metric_value,
                     source_payload=excluded.source_payload, source_run_id=excluded.source_run_id,
-                    loaded_at=excluded.loaded_at
-            """, metric_rows)
+                    loaded_at=excluded.loaded_at""")
 
         con.execute("COMMIT")
     except Exception:
