@@ -1,0 +1,48 @@
+name: MotherDuck service-account write test
+
+on:
+  push:
+    branches:
+      - test/motherduck-write
+
+permissions:
+  contents: read
+
+jobs:
+  write-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install DuckDB client
+        run: python -m pip install 'duckdb==1.5.6'
+
+      - name: Test GithubGarmin database write access
+        env:
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          import duckdb
+
+          if not os.environ.get("MOTHERDUCK_TOKEN"):
+              raise RuntimeError("MOTHERDUCK_TOKEN secret is missing")
+
+          con = duckdb.connect("md:garmin")
+          table = "main.__githubgarmin_write_test"
+          try:
+              con.execute(f"CREATE TABLE {table} (id INTEGER, note VARCHAR)")
+              con.execute(f"INSERT INTO {table} VALUES (1, 'write access confirmed')")
+              result = con.execute(f"SELECT id, note FROM {table}").fetchone()
+              if result != (1, "write access confirmed"):
+                  raise RuntimeError(f"Unexpected test result: {result!r}")
+              print("WRITE_TEST_SUCCESS: connected, created table, inserted, and read back a row.")
+          finally:
+              con.execute(f"DROP TABLE IF EXISTS {table}")
+              print("CLEANUP_SUCCESS: test table dropped.")
+              con.close()
+          PY
