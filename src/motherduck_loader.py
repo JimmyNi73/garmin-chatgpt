@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -20,16 +21,27 @@ def stable_record_key(source_name: str, record: dict[str, Any], index: int) -> s
         value = record.get(key)
         if value is not None:
             return str(value)
-    # Some Garmin series contain multiple snapshots per calendar day. Hash the
-    # complete canonical record rather than collapsing them to one date key.
     canonical = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(f"{source_name}:{canonical}".encode()).hexdigest()
 
 
 def connect(database: str | None = None) -> duckdb.DuckDBPyConnection:
+    """Create the target database if needed, then connect to it.
+
+    The account-level connection uses the GitHub service-account token.
+    It never attaches to or modifies the personal 'garmin' database.
+    """
     if not os.getenv("MOTHERDUCK_TOKEN"):
         raise RuntimeError("MOTHERDUCK_TOKEN is not configured")
-    target = database or os.getenv("MOTHERDUCK_DATABASE", "garmin")
+    target = database or os.getenv("MOTHERDUCK_DATABASE", "garmin_github")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", target):
+        raise ValueError(f"Invalid MotherDuck database identifier: {target!r}")
+
+    admin = duckdb.connect("md:")
+    try:
+        admin.execute(f"CREATE DATABASE IF NOT EXISTS {target}")
+    finally:
+        admin.close()
     return duckdb.connect(f"md:{target}")
 
 
