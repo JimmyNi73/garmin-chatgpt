@@ -7,7 +7,11 @@ import uuid
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from garmin_personal_api.api_keys import resolve_api_key\nfrom garmin_personal_api.auth import PersonalApiAuthenticator\nfrom garmin_personal_api.client import GarminPersonalApiClient\n\nfrom garmin_export import (
+from garmin_personal_api.api_keys import resolve_api_key
+from garmin_personal_api.auth import PersonalApiAuthenticator
+from garmin_personal_api.client import GarminPersonalApiClient
+
+from garmin_export import (
     GarminCLI, activity_records, enrich_gear_records, fetch_activities,
     fetch_gear_data, optional_range, date_index,
 )
@@ -63,6 +67,28 @@ def main():
 
     datasets = {"activities": activities}
     errors = []
+    # These range endpoints are not exposed by the existing gc-personal CLI
+    # wrapper; call them with the same Garmin Personal API token flow as gear.
+    with PersonalApiAuthenticator() as auth:
+        token = auth.obtain_token(resolve_api_key())
+        with GarminPersonalApiClient(token.access_token) as api:
+            for source_name, endpoint in (
+                ("vo2_max_daily", f"/metrics-service/metrics/maxmet/daily/{start_text}/{end_text}"),
+                ("training_readiness_daily", f"/metrics-service/metrics/trainingreadiness/{start_text}/{end_text}"),
+            ):
+                try:
+                    response = api.get(endpoint)
+                    if isinstance(response, list):
+                        datasets[source_name] = [row for row in response if isinstance(row, dict)]
+                    elif isinstance(response, dict):
+                        datasets[source_name] = [response]
+                    else:
+                        datasets[source_name] = []
+                    LOG.info("%s: %d records", source_name, len(datasets[source_name]))
+                except Exception as exc:
+                    errors.append({"source": source_name, "error": str(exc)})
+                    LOG.exception("%s endpoint unavailable", source_name)
+
     for source_name, command in RANGE_SOURCES.items():
         ok, value = optional_range(
             cli, errors, [], source_name,
