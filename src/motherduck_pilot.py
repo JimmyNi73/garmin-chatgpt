@@ -7,7 +7,7 @@ import uuid
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from garmin_export import (
+from garmin_personal_api.api_keys import resolve_api_key\nfrom garmin_personal_api.auth import PersonalApiAuthenticator\nfrom garmin_personal_api.client import GarminPersonalApiClient\n\nfrom garmin_export import (
     GarminCLI, activity_records, enrich_gear_records, fetch_activities,
     fetch_gear_data, optional_range, date_index,
 )
