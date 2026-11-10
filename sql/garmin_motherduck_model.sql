@@ -15,6 +15,12 @@ CREATE TABLE IF NOT EXISTS core.activities (
     device_id VARCHAR, gear_id VARCHAR, source_payload JSON NOT NULL,
     source_run_id VARCHAR NOT NULL, loaded_at TIMESTAMPTZ NOT NULL
 );
+CREATE TABLE IF NOT EXISTS core.activity_workouts (
+    activity_id VARCHAR NOT NULL, workout_index INTEGER NOT NULL,
+    workout_payload JSON NOT NULL, source_run_id VARCHAR NOT NULL,
+    loaded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (activity_id, workout_index)
+);
 CREATE TABLE IF NOT EXISTS core.daily_metrics (
     metric_source VARCHAR NOT NULL, record_key VARCHAR NOT NULL,
     metric_date DATE, metric_value JSON, source_payload JSON NOT NULL,
