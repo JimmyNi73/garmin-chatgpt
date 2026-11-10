@@ -1,76 +1,27 @@
-name: Garmin MotherDuck Pilot
+name: Garmin MotherDuck Test
 
 on:
-  push:
-    branches:
-      - feature/motherduck-service-db
+  # Deliberately manual only. A push must never start an ingestion job.
   workflow_dispatch:
     inputs:
-      days:
-        description: "Number of recent calendar days to load"
+      confirm_test:
+        description: "Type RUN to confirm the controlled MotherDuck test"
         required: true
-        default: "14"
-        type: choice
-        options:
-          - "7"
-          - "14"
-          - "30"
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: garmin-motherduck-service-db-pilot
+  group: garmin-motherduck-service-db-test
   cancel-in-progress: false
 
 jobs:
-  pilot:
+  guard:
+    if: ${{ inputs.confirm_test == 'RUN' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        include:
-          - period: "2011-08"
-            start_date: "2011-08-01"
-            end_date: "2011-08-31"
-            days: ""
-          - period: "2022-10"
-            start_date: "2022-10-01"
-            end_date: "2022-10-31"
-            days: ""
-          - period: "recent-14-days"
-            start_date: ""
-            end_date: ""
-            days: "14"
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: feature/motherduck-service-db
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: python -m pip install --upgrade 'duckdb==1.5.6' dropbox garmin-connect-personal-api-python
-
-      - name: Validate code and tests
+      - name: Block until the new record-level exporter is implemented
         run: |
-          python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_pilot.py
-          python -m unittest discover -s tests -p 'test_motherduck_loader.py' -v
-
-      - name: Run historical Garmin to MotherDuck pilot (${{ matrix.period }})
-        env:
-          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
-          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
-          MOTHERDUCK_DATABASE: garmin_github
-          PILOT_START_DATE: ${{ matrix.start_date }}
-          PILOT_END_DATE: ${{ matrix.end_date }}
-          PILOT_DAYS: ${{ matrix.days || '14' }}
-          GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
-          GARMIN_BATCH_PAUSE_SECONDS: "5"
-          GARMIN_MAX_RETRIES: "5"
-        run: |
-          PYTHONPATH=src python src/motherduck_pilot.py
+          echo "The legacy pilot is disabled. The new two-month + recent-14-day exporter is not yet implemented."
+          exit 1
