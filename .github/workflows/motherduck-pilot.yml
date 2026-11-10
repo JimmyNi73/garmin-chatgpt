@@ -27,6 +27,16 @@ jobs:
   pilot:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - period: "2011-08"
+            start_date: "2011-08-01"
+            end_date: "2011-08-31"
+          - period: "2022-10"
+            start_date: "2022-10-01"
+            end_date: "2022-10-31"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,12 +54,13 @@ jobs:
           python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_pilot.py
           python -m unittest discover -s tests -p 'test_motherduck_loader.py' -v
 
-      - name: Run 14-day Garmin to MotherDuck pilot
+      - name: Run historical Garmin to MotherDuck pilot (${{ matrix.period }})
         env:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
           MOTHERDUCK_DATABASE: garmin_github
-          PILOT_DAYS: ${{ inputs.days || '14' }}
+          PILOT_START_DATE: ${{ matrix.start_date }}
+          PILOT_END_DATE: ${{ matrix.end_date }}
           GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
           GARMIN_BATCH_PAUSE_SECONDS: "5"
           GARMIN_MAX_RETRIES: "5"
