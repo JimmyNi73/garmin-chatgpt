@@ -23,7 +23,7 @@ concurrency:
 jobs:
   pilot:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,24 +34,21 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: python -m pip install --upgrade duckdb
+        run: python -m pip install --upgrade duckdb dropbox garmin-connect-personal-api-python
 
       - name: Validate code and tests
         run: |
-          python -m py_compile src/motherduck_loader.py
-          python -m unittest tests.test_motherduck_loader -v
+          python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_pilot.py
+          python -m unittest discover -s tests -p 'test_motherduck_loader.py' -v
 
-      - name: Validate MotherDuck connection
+      - name: Run 14-day Garmin to MotherDuck pilot
         env:
+          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
           MOTHERDUCK_DATABASE: my_db
           PILOT_DAYS: ${{ inputs.days }}
+          GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
+          GARMIN_BATCH_PAUSE_SECONDS: "5"
+          GARMIN_MAX_RETRIES: "5"
         run: |
-          python - <<'PY'
-          import os, duckdb
-          if not os.getenv("MOTHERDUCK_TOKEN"):
-              raise SystemExit("Missing GitHub secret MOTHERDUCK_TOKEN")
-          con = duckdb.connect("md:" + os.getenv("MOTHERDUCK_DATABASE", "my_db"))
-          print("MotherDuck connection OK")
-          con.close()
-          PY
+          PYTHONPATH=src python src/motherduck_pilot.py
