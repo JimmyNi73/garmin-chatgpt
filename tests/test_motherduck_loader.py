@@ -1,6 +1,10 @@
 import unittest
 
-from src.motherduck_loader import event_date, stable_record_key
+import duckdb
+
+from src.motherduck_loader import (
+    ensure_schema, event_date, load_records, stable_record_key,
+)
 
 
 class LoaderTests(unittest.TestCase):
@@ -24,6 +28,46 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(
             stable_record_key("daily", row, 0),
             stable_record_key("daily", row, 0),
+        )
+
+    def test_bulk_activity_and_metric_loads(self):
+        con = duckdb.connect(":memory:")
+        self.addCleanup(con.close)
+        ensure_schema(con)
+
+        activities = [
+            {
+                "summary": {
+                    "activityId": "a-1", "startTimeLocal": "2024-01-01 07:00:00",
+                    "activityType": {"typeKey": "running"}, "distance": 1000,
+                    "duration": 300, "averageHR": 140,
+                },
+                "device": {"device_id": "d-1", "device_model": "Garmin epix"},
+                "gear": {"gear_id": "g-1", "gear": {"name": "Running shoe"}},
+                "workouts": [{"steps": []}],
+            },
+            {
+                "summary": {
+                    "activityId": "a-2", "startTimeLocal": "2024-01-02 07:00:00",
+                    "activityType": {"typeKey": "running"}, "distance": 2000,
+                    "duration": 600, "averageHR": 145,
+                },
+                "workouts": [],
+            },
+        ]
+        self.assertEqual(load_records(con, "activities", activities, "test-run"), 2)
+        metrics = [
+            {"calendarDate": "2024-01-01", "source_payload": {"steps": 5000}},
+            {"calendarDate": "2024-01-02", "source_payload": {"steps": 6000}},
+        ]
+        self.assertEqual(load_records(con, "steps", metrics, "test-run"), 2)
+
+        self.assertEqual(con.execute("SELECT count(*) FROM core.activities").fetchone()[0], 2)
+        self.assertEqual(con.execute("SELECT count(*) FROM core.activity_workouts").fetchone()[0], 1)
+        self.assertEqual(con.execute("SELECT count(*) FROM core.daily_metrics").fetchone()[0], 2)
+        self.assertEqual(
+            con.execute("SELECT device_id, gear_id FROM core.activities WHERE activity_id='a-1'").fetchone(),
+            ("d-1", "g-1"),
         )
 
 
