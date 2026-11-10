@@ -117,6 +117,32 @@ def collect_archive(dbx: Any) -> tuple[dict[str, list[dict[str, Any]]], dict[str
         file_activity_counts[entry.name] = len(ids)
         for row in activities:
             activities_by_id[_activity_id(row)] = row
+            # Older monthly archives may omit top-level registries while each
+            # activity still carries its resolved device and gear assignment.
+            device = row.get("device")
+            if isinstance(device, dict):
+                device_id = device.get("device_id", device.get("deviceId"))
+                if device_id is not None:
+                    devices_by_id[str(device_id)] = device
+            else:
+                summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
+                detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
+                device_id = summary.get("deviceId", detail.get("deviceId"))
+                if device_id is not None:
+                    devices_by_id[str(device_id)] = {
+                        "device_id": str(device_id),
+                        "device_model": None,
+                        "source": "activity_record",
+                    }
+            gear = row.get("gear")
+            if isinstance(gear, dict):
+                gear_id = gear.get("gear_id", gear.get("gearPk", gear.get("gearId")))
+                gear_meta = gear.get("gear")
+                if gear_id is not None:
+                    gear_by_id[str(gear_id)] = {
+                        "gear_id": str(gear_id),
+                        **(gear_meta if isinstance(gear_meta, dict) else {}),
+                    }
 
         for device in payload.get("devices", []) or []:
             if not isinstance(device, dict):
