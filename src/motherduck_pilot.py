@@ -33,44 +33,61 @@ RANGE_SOURCES = {
 
 
 def records_from_indexed(value):
-    """Normalize Garmin range responses, including nested weight summaries."""
-    rows = None
-    if isinstance(value, dict):
+    """Flatten Garmin range responses, including nested weight summaries."""
+    output = []
+    def visit(node):
+        if isinstance(node, list):
+            for item in node:
+                visit(item)
+            return
+        if not isinstance(node, dict):
+            return
         for key in ("dailyWeightSummaries", "dailySummaries", "summaries", "items", "data"):
-            if isinstance(value.get(key), list):
-                rows = value[key]
-                break
-    elif isinstance(value, list):
-        rows = value
-    if rows is not None:
-        output = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            day = next((str(row[k])[:10] for k in
-                        ("calendarDate", "date", "measurementDate", "startDate")
-                        if row.get(k)), None)
-            if day:
-                output.append({"calendarDate": day, **row})
-        return output
-    indexed = date_index(value)
-    return [{"calendarDate": day, **row}
-            for day, row in indexed["by_date"].items()]
+            nested = node.get(key)
+            if isinstance(nested, list):
+                for item in nested:
+                    visit(item)
+                return
+        day = next((str(node[k])[:10] for k in
+                    ("calendarDate", "date", "measurementDate", "startDate", "summaryDate")
+                    if node.get(k)), None)
+        if day:
+            output.append({"calendarDate": day, **node})
+            return
+        for key, item in node.items():
+            if isinstance(item, (dict, list)):
+                visit(item)
+    visit(value)
+    # De-duplicate by date + measurement identifier/value; preserve multiple
+    # weigh-ins on the same date.
+    unique = {}
+    for row in output:
+        identity = (row["calendarDate"], row.get("samplePk") or row.get("measurementId")
+                    or row.get("version") or repr(sorted(row.items())))
+        unique[identity] = row
+    return list(unique.values())
 
 
 def fetch_range_chunked(cli, command, start, end, max_days=28):
-    """Fetch Garmin date ranges in bounded windows and merge responses."""
+    """Fetch Garmin date ranges in bounded windows; skip empty 400 windows."""
     merged = []
     cursor = start
     while cursor <= end:
         chunk_end = min(end, cursor + timedelta(days=max_days - 1))
-        value = cli.run(f"{command} {cursor}..{chunk_end}", command,
-                        "--start-date", cursor.isoformat(),
-                        "--end-date", chunk_end.isoformat())
-        if isinstance(value, list):
-            merged.extend(value)
-        elif isinstance(value, dict):
-            merged.append(value)
+        try:
+            value = cli.run(f"{command} {cursor}..{chunk_end}", command,
+                            "--start-date", cursor.isoformat(),
+                            "--end-date", chunk_end.isoformat())
+            if isinstance(value, list):
+                merged.extend(value)
+            elif isinstance(value, dict):
+                merged.append(value)
+        except Exception as exc:
+            if "400" in str(exc):
+                LOG.warning("%s %s..%s: Garmin returned 400; no rows for this chunk",
+                            command, cursor, chunk_end)
+            else:
+                raise
         cursor = chunk_end + timedelta(days=1)
     return merged
 
@@ -133,8 +150,13 @@ def main():
             if profile_id is None:
                 profile_id = 3889253
             gear_registry = {}
-            gear_rows = api.get("/gear-service/gear/filterGear",
-                                params={"userProfilePk": str(profile_id)})
+            try:
+                gear_rows = api.get("/gear-service/gear/filterGear",
+                                    params={"userProfilePk": str(profile_id)})
+            except Exception as legacy_exc:
+                LOG.warning("Legacy gear list endpoint unavailable; trying v2 list: %s", legacy_exc)
+                gear_rows = api.get("/gear-service/gear/v2/list",
+                                    params={"start": 0, "limit": 100})
             if isinstance(gear_rows, list):
                 for item in gear_rows:
                     if isinstance(item, dict):
@@ -142,7 +164,7 @@ def main():
                         if gid is not None:
                             gear_registry[str(gid)] = item
             elif isinstance(gear_rows, dict):
-                for item in gear_rows.get("gearDTOS", []):
+                for item in gear_rows.get("gearDTOS", gear_rows.get("items", [])):
                     if isinstance(item, dict):
                         gid = item.get("gearPk") or item.get("uuid")
                         if gid is not None:
@@ -155,8 +177,12 @@ def main():
                 if aid is None:
                     continue
                 try:
-                    linked = api.get("/gear-service/gear/filterGear",
-                                     params={"activityId": str(aid)})
+                    try:
+                        linked = api.get("/gear-service/gear/filterGear",
+                                         params={"activityId": str(aid)})
+                    except Exception:
+                        linked = api.get(f"/gear-service/activity/v2/{aid}")
+
                     linked_rows = linked if isinstance(linked, list) else ([linked] if isinstance(linked, dict) else [])
                     for gear in linked_rows:
                         if isinstance(gear, dict):
