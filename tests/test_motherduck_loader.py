@@ -11,8 +11,11 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(event_date({"startTimeLocal": "2026-11-10 07:30:00"}), "2026-11-10")
 
     def test_stable_key_uses_activity_id(self):
+        self.assertEqual(stable_record_key("activities", {"activityId": 123}, 0), "123")
+
+    def test_nested_summary_activity_id_wins_over_generic_id(self):
         self.assertEqual(
-            stable_record_key("activities", {"activityId": 123}, 0),
+            stable_record_key("activities", {"id": "hash", "summary": {"activityId": 123}}, 0),
             "123",
         )
 
