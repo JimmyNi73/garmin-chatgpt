@@ -115,6 +115,20 @@ def load_month_payload(con: duckdb.DuckDBPyConnection, month: str,
            for row in activities if isinstance(row, dict)]
     if len(ids) != len(activities) or any(value is None for value in ids) or len(ids) != len(set(map(str, ids))):
         raise RuntimeError(f"Month {month} has missing or duplicate activity IDs")
-    return load_records(con, "monthly_exports", [{
-        "calendarDate": month + "-01", "payload": payload
-    }], source_run_id)
+    loaded_at = datetime.now(timezone.utc)
+    con.execute("BEGIN TRANSACTION")
+    try:
+        con.execute("""
+            INSERT INTO raw.garmin_payloads
+            VALUES ('monthly_exports', ?, TRY_CAST(? AS DATE), ?::JSON, ?, ?)
+            ON CONFLICT (source_name, record_key) DO UPDATE SET
+                event_date = excluded.event_date, payload = excluded.payload,
+                source_run_id = excluded.source_run_id, loaded_at = excluded.loaded_at
+        """, [month, month + "-01",
+              json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+              source_run_id, loaded_at])
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+    return 1
