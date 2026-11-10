@@ -3,7 +3,7 @@ name: Garmin MotherDuck Pilot
 on:
   push:
     branches:
-      - feature/motherduck-ingestion
+      - feature/motherduck-service-db
   workflow_dispatch:
     inputs:
       days:
@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: garmin-motherduck-pilot
+  group: garmin-motherduck-service-db-pilot
   cancel-in-progress: false
 
 jobs:
@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: feature/motherduck-ingestion
+          ref: feature/motherduck-service-db
 
       - uses: actions/setup-python@v5
         with:
@@ -48,7 +48,7 @@ jobs:
         env:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
-          MOTHERDUCK_DATABASE: garmin
+          MOTHERDUCK_DATABASE: garmin_github
           PILOT_DAYS: ${{ inputs.days || '14' }}
           GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
           GARMIN_BATCH_PAUSE_SECONDS: "5"
