@@ -1,4 +1,4 @@
-name: Garmin MotherDuck Test (manual only)
+name: Garmin Data Export
 
 on:
   push:
