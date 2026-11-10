@@ -150,12 +150,28 @@ def fetch_gear_data(cli: GarminCLI) -> tuple[dict[int, dict[str, Any]], dict[str
 def enrich_gear_records(rows: list[dict[str, Any]],
                         registry: dict[int, dict[str, Any]],
                         activity_to_gear: dict[str, int]) -> None:
+    """Enrich from the Garmin assignment map; fall back only to IDs in activity payloads."""
     for row in rows:
         summary = row.get("summary", {})
         aid = activity_id(summary) if isinstance(summary, dict) else None
         gear_id = activity_to_gear.get(aid) if aid else None
+        gear_payload = registry.get(gear_id) if gear_id is not None else None
+        if gear_id is None:
+            # Some Garmin activity details carry a direct gear primary key even
+            # when the separate gear registry endpoint is unavailable.
+            for source in (row.get("detail"), summary):
+                if not isinstance(source, dict):
+                    continue
+                candidate = source.get("gearPk", source.get("gearId", source.get("gear_id")))
+                try:
+                    gear_id = int(candidate) if candidate is not None else None
+                except (TypeError, ValueError):
+                    gear_id = None
+                if gear_id is not None:
+                    gear_payload = registry.get(gear_id)
+                    break
         row["gear"] = (
-            {"gear_id": gear_id, "gear": registry.get(gear_id)}
+            {"gear_id": gear_id, "gear": gear_payload}
             if gear_id is not None else None
         )
 
