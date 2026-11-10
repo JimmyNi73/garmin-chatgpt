@@ -39,6 +39,12 @@ class ExportHelperTests(unittest.TestCase):
         self.assertEqual(rows[0]["gear"]["gear_id"], 42)
         self.assertEqual(rows[0]["gear"]["gear"]["customMakeModel"], "Saucony Triumph")
 
+    def test_gear_direct_activity_id_survives_unavailable_registry(self):
+        rows = [{"summary": {"activityId": 789}, "detail": {"gearPk": 17}}]
+        ge.enrich_gear_records(rows, {}, {})
+        self.assertEqual(rows[0]["gear"]["gear_id"], 17)
+        self.assertIsNone(rows[0]["gear"]["gear"])
+
     def test_unknown_device_is_null_not_guessed(self):
         row = ge.enrich_device_ids({"detail": {"deviceId": 999999}})
         self.assertIsNone(row["detail"]["device_model"])
