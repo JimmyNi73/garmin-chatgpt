@@ -150,37 +150,50 @@ def main() -> None:
     datasets: dict[str, list[dict]] = {}
     summaries_by_id: dict[str, dict] = {}
 
-    windows = []
-    for month in HISTORIC_MONTHS:
-        start, end = month_bounds(month)
-        windows.append((start, end, f"historic:{month}"))
-    windows.append((recent_start, today, "recent:14d"))
-
-    for start, end, label in windows:
-        LOG.info("Fetching activities %s (%s..%s)", label, start, end)
-        summaries = fetch_activities(cli, start.isoformat(), end.isoformat())
-        for summary in summaries:
+    # Full Garmin history: fetch the activity index year-by-year, then retrieve
+    # every activity detail and every available monthly health period. No Dropbox
+    # dependency and no date sampling.
+    for year in range(2000, today.year + 1):
+        year_start = date(year, 1, 1)
+        year_end = min(date(year, 12, 31), today)
+        LOG.info("Fetching Garmin activity index for %d (%s..%s)", year, year_start, year_end)
+        year_summaries = fetch_activities(cli, year_start.isoformat(), year_end.isoformat())
+        for summary in year_summaries:
             aid = summary.get("activityId", summary.get("activity_id", summary.get("id")))
             if aid is None:
-                raise RuntimeError(f"{label}: activity summary without activityId")
+                raise RuntimeError(f"Garmin activity index {year}: missing activityId")
             summaries_by_id[str(aid)] = summary
 
-        # Health API calls are month-bounded by Garmin's own API restrictions.
-        cursor = start.replace(day=1)
-        while cursor <= end:
-            month = cursor.strftime("%Y-%m")
-            health = fetch_month_health(cli, month, today=today)
-            meta = health.get("metadata", {})
-            if meta.get("export_status") != "complete":
-                raise RuntimeError(f"Health source errors for {label}/{month}: "
-                                   f"{health.get('source_errors', [])}")
-            for row in health_records("health", health, start, end):
-                metric = row.pop("metric_source")
-                datasets.setdefault(metric, []).append(row)
-            if cursor.month == 12:
-                cursor = date(cursor.year + 1, 1, 1)
-            else:
-                cursor = date(cursor.year, cursor.month + 1, 1)
+    if not summaries_by_id:
+        raise RuntimeError("Garmin returned no activity history; refusing an empty full load")
+    activity_dates = []
+    for summary in summaries_by_id.values():
+        stamp = summary.get("startTimeLocal") or summary.get("startTimeGMT")
+        if stamp:
+            try:
+                activity_dates.append(date.fromisoformat(str(stamp)[:10]))
+            except ValueError:
+                pass
+    if not activity_dates:
+        raise RuntimeError("Garmin activity index has no usable dates")
+    first_month = min(activity_dates).replace(day=1)
+    cursor = first_month
+    while cursor <= today:
+        month_start = cursor
+        next_month = (date(cursor.year + 1, 1, 1) if cursor.month == 12
+                      else date(cursor.year, cursor.month + 1, 1))
+        month_end = min(next_month - timedelta(days=1), today)
+        month = cursor.strftime("%Y-%m")
+        LOG.info("Fetching full-month Garmin health history %s (%s..%s)",
+                 month, month_start, month_end)
+        health = fetch_month_health(cli, month, today=today)
+        meta = health.get("metadata", {})
+        if meta.get("export_status") != "complete":
+            raise RuntimeError(f"Health source errors for {month}: {health.get('source_errors', [])}")
+        for row in health_records("health", health, month_start, month_end):
+            metric = row.pop("metric_source")
+            datasets.setdefault(metric, []).append(row)
+        cursor = next_month
 
     summaries = list(summaries_by_id.values())
     activities = activity_records(cli, summaries) if summaries else []
@@ -234,7 +247,7 @@ def main() -> None:
     weight_rows = len(datasets.get("weight_measurements", []))
     if weight_rows == 0:
         LOG.warning("Garmin returned no weight measurements in the selected windows; continuing without inventing or importing historical values")
-    LOG.info("Preflight passed: %d activities, %d with gear, %d Garmin gear items, "
+    LOG.info("FULL-HISTORY preflight passed: %d activities, %d with gear, %d Garmin gear items, "
              "%d weight records, %d Garmin requests, sources=%s",
              len(activities), mapped_activities, len(gear_registry), weight_rows,
              cli.request_count, {name: len(rows) for name, rows in datasets.items()})
