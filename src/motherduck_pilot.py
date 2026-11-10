@@ -150,45 +150,59 @@ def main():
             if profile_id is None:
                 profile_id = 3889253
             gear_registry = {}
+            gear_links = []
             try:
                 gear_rows = api.get("/gear-service/gear/filterGear",
                                     params={"userProfilePk": str(profile_id)})
-            except Exception as legacy_exc:
-                LOG.warning("Legacy gear list endpoint unavailable; trying v2 list: %s", legacy_exc)
-                gear_rows = api.get("/gear-service/gear/v2/list",
-                                    params={"start": 0, "limit": 100})
-            if isinstance(gear_rows, list):
-                for item in gear_rows:
-                    if isinstance(item, dict):
-                        gid = item.get("gearPk") or item.get("uuid") or item.get("gearUUID")
-                        if gid is not None:
-                            gear_registry[str(gid)] = item
-            elif isinstance(gear_rows, dict):
-                for item in gear_rows.get("gearDTOS", gear_rows.get("items", [])):
-                    if isinstance(item, dict):
-                        gid = item.get("gearPk") or item.get("uuid")
-                        if gid is not None:
-                            gear_registry[str(gid)] = item
+                if isinstance(gear_rows, list):
+                    if len(gear_rows) == 1 and isinstance(gear_rows[0], dict):
+                        gear_rows = gear_rows[0]
+                if isinstance(gear_rows, dict):
+                    rows = gear_rows.get("gearDTOS", gear_rows.get("items", []))
+                    for item in rows:
+                        if isinstance(item, dict):
+                            gid = item.get("gearPk") or item.get("uuid") or item.get("gearUUID")
+                            if gid is not None:
+                                gear_registry[str(gid)] = item
+                    # Garmin can return gear-to-activity mappings in the same response.
+                    links_by_gear = gear_rows.get("gearActivityDTOs", {})
+                    if isinstance(links_by_gear, dict):
+                        for gear_id, links in links_by_gear.items():
+                            if not isinstance(links, list):
+                                continue
+                            for link in links:
+                                if isinstance(link, dict) and link.get("activityId") is not None:
+                                    gear_links.append({
+                                        "activityId": str(link["activityId"]),
+                                        "gear_id": str(link.get("gearPk", gear_id)),
+                                    })
+                elif isinstance(gear_rows, list):
+                    for item in gear_rows:
+                        if isinstance(item, dict):
+                            gid = item.get("gearPk") or item.get("uuid") or item.get("gearUUID")
+                            if gid is not None:
+                                gear_registry[str(gid)] = item
+            except Exception as gear_exc:
+                # Gear is optional. Garmin has returned 404 for these endpoints
+                # on accounts where activity data is still available.
+                LOG.warning("Garmin gear registry unavailable; continuing without gear: %s",
+                            gear_exc)
 
-            gear_links = []
-            for activity in activities:
-                summary = activity.get("summary", {})
-                aid = summary.get("activityId") or summary.get("activity_id")
-                if aid is None:
-                    continue
-                try:
+            if gear_registry and not gear_links:
+                for activity in activities:
+                    summary = activity.get("summary", {})
+                    aid = summary.get("activityId") or summary.get("activity_id")
+                    if aid is None:
+                        continue
                     try:
                         linked = api.get("/gear-service/gear/filterGear",
                                          params={"activityId": str(aid)})
-                    except Exception:
-                        linked = api.get(f"/gear-service/activity/v2/{aid}")
-
-                    linked_rows = linked if isinstance(linked, list) else ([linked] if isinstance(linked, dict) else [])
-                    for gear in linked_rows:
-                        if isinstance(gear, dict):
-                            gear_links.append({"activityId": str(aid), "gear": gear})
-                except Exception as exc:
-                    LOG.warning("Gear lookup for activity %s failed: %s", aid, exc)
+                        linked_rows = linked if isinstance(linked, list) else ([linked] if isinstance(linked, dict) else [])
+                        for gear in linked_rows:
+                            if isinstance(gear, dict):
+                                gear_links.append({"activityId": str(aid), "gear": gear})
+                    except Exception as exc:
+                        LOG.warning("Gear lookup for activity %s unavailable: %s", aid, exc)
             datasets["gear_registry"] = list(gear_registry.values())
             datasets["gear_activity_links"] = gear_links
             LOG.info("Gear: %d registry entries, %d activity links",
