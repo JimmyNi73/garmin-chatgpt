@@ -104,7 +104,7 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
 def load_month_payload(con: duckdb.DuckDBPyConnection, month: str,
                        payload: dict[str, Any], source_run_id: str) -> int:
     """Store the unmodified Dropbox-equivalent monthly document as one RAW row."""
-    if not re.fullmatch(r"\\d{4}-\\d{2}", month):
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
         raise ValueError(f"Invalid month key: {month}")
     if payload.get("metadata", {}).get("export_status") != "complete":
         raise RuntimeError(f"Refusing to load incomplete month {month}")
