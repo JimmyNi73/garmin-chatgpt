@@ -46,12 +46,22 @@ def main():
         raise RuntimeError("GitHub secret MOTHERDUCK_TOKEN is missing; refusing to call Garmin before destination is ready")
     if not os.getenv("GARMIN_PERSONAL_API_KEY"):
         raise RuntimeError("GARMIN_PERSONAL_API_KEY is missing")
-    days = int(os.getenv("PILOT_DAYS", "14"))
-    if days not in (7, 14, 30):
-        raise ValueError("PILOT_DAYS must be 7, 14, or 30")
-
-    end = datetime.now(TZ).date()
-    start = end - timedelta(days=days - 1)
+    start_arg = os.getenv("PILOT_START_DATE")
+    end_arg = os.getenv("PILOT_END_DATE")
+    if bool(start_arg) != bool(end_arg):
+        raise ValueError("PILOT_START_DATE and PILOT_END_DATE must be supplied together")
+    if start_arg and end_arg:
+        start = date.fromisoformat(start_arg)
+        end = date.fromisoformat(end_arg)
+        if end < start:
+            raise ValueError("PILOT_END_DATE must be on or after PILOT_START_DATE")
+        days = (end - start).days + 1
+    else:
+        days = int(os.getenv("PILOT_DAYS", "14"))
+        if days not in (7, 14, 30):
+            raise ValueError("PILOT_DAYS must be 7, 14, or 30")
+        end = datetime.now(TZ).date()
+        start = end - timedelta(days=days - 1)
     start_text, end_text = start.isoformat(), end.isoformat()
     run_id = str(uuid.uuid4())
     LOG.info("Pilot window: %s through %s (%d days)", start_text, end_text, days)
