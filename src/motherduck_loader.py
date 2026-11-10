@@ -231,7 +231,7 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
                     str(gear_id) if gear_id is not None else None,
                     _json(record), source_run_id, loaded_at))
             _bulk_insert(con, "core.activities", core_rows,
-                "?,TRY_CAST(? AS DATE),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?::JSON,?,?",
+                "?,TRY_CAST(? AS DATE),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?::JSON,?,?",
                 """ON CONFLICT (activity_id) DO UPDATE SET
                     activity_date=excluded.activity_date, activity_type=excluded.activity_type,
                     activity_name=excluded.activity_name, distance_m=excluded.distance_m,
