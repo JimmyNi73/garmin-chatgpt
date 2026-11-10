@@ -73,6 +73,14 @@ def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
         )
     """)
     con.execute("""
+        CREATE TABLE IF NOT EXISTS core.activity_workouts (
+            activity_id VARCHAR NOT NULL, workout_index INTEGER NOT NULL,
+            workout_payload JSON NOT NULL, source_run_id VARCHAR NOT NULL,
+            loaded_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (activity_id, workout_index)
+        )
+    """)
+    con.execute("""
         CREATE TABLE IF NOT EXISTS core.daily_metrics (
             metric_source VARCHAR NOT NULL, record_key VARCHAR NOT NULL,
             metric_date DATE, metric_value JSON, source_payload JSON NOT NULL,
@@ -195,6 +203,23 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
                     source_payload=excluded.source_payload, source_run_id=excluded.source_run_id,
                     loaded_at=excluded.loaded_at
             """, core_rows)
+            workout_rows = []
+            for record in rows:
+                summary = _summary(record)
+                activity_id = _first(summary.get("activityId"), record.get("activityId"),
+                                      record.get("activity_id"), record.get("id"))
+                workouts = record.get("workouts")
+                if activity_id is not None and isinstance(workouts, list):
+                    for workout_index, workout in enumerate(workouts):
+                        workout_rows.append((str(activity_id), workout_index, _json(workout),
+                                             source_run_id, loaded_at))
+            if workout_rows:
+                con.executemany("""
+                    INSERT INTO core.activity_workouts VALUES (?, ?, ?::JSON, ?, ?)
+                    ON CONFLICT (activity_id, workout_index) DO UPDATE SET
+                        workout_payload=excluded.workout_payload,
+                        source_run_id=excluded.source_run_id, loaded_at=excluded.loaded_at
+                """, workout_rows)
         elif source_name == "devices":
             device_rows = []
             for record in rows:
