@@ -117,6 +117,34 @@ def normalize_vo2_response(value, requested_day=None):
     return output
 
 
+def vo2_rows_from_summaries(summaries):
+    """Extract Garmin VO2 max values from documented activity summaries."""
+    rows = []
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            continue
+        value = summary.get("vO2MaxValue")
+        if value is None:
+            continue
+        start = summary.get("startTimeLocal") or summary.get("startTimeGMT")
+        if not start:
+            continue
+        activity_type = summary.get("activityType")
+        if isinstance(activity_type, dict):
+            sport = (activity_type.get("typeKey") or activity_type.get("typeName")
+                     or activity_type.get("parentTypeId") or "unknown")
+        else:
+            sport = activity_type or "unknown"
+        rows.append({
+            "calendarDate": str(start)[:10],
+            "activityId": str(summary.get("activityId") or ""),
+            "sport": str(sport),
+            "vo2MaxValue": value,
+            "source_payload": summary,
+        })
+    return rows
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if not os.getenv("MOTHERDUCK_TOKEN"):
@@ -149,141 +177,13 @@ def main():
     datasets = {"activities": activities}
     errors = []
 
-    with PersonalApiAuthenticator() as auth:
-        token = auth.obtain_token(resolve_api_key())
-        with GarminPersonalApiClient(token.access_token) as api:
-            profile = api.get("/userprofile-service/userprofile/settings")
-            def find_profile_id(node):
-                if isinstance(node, dict):
-                    for key in ("userProfilePk", "userProfileId"):
-                        if node.get(key) is not None:
-                            return node[key]
-                    for value in node.values():
-                        found = find_profile_id(value)
-                        if found is not None:
-                            return found
-                elif isinstance(node, list):
-                    for value in node:
-                        found = find_profile_id(value)
-                        if found is not None:
-                            return found
-                return None
+    # VO2 max is exposed by Garmin's documented activity-list endpoint
+    # as SummarizedActivityDTO.vO2MaxValue. Do not call internal metrics-service URLs.
+    vo2_rows = vo2_rows_from_summaries(summaries)
+    datasets["vo2_max_daily"] = vo2_rows
+    LOG.info("VO2 max from activity summaries: %d measurements", len(vo2_rows))
 
-            profile_id = find_profile_id(profile)
-            # Garmin's settings endpoint omits the profile key for this account.
-            # The profile PK was confirmed from the authenticated Connect response
-            # during earlier pilot diagnostics; allow an environment override.
-            profile_id = profile_id or os.getenv("GARMIN_USER_PROFILE_PK") or "3889253"
-            LOG.info("Using Garmin profile key for gear lookup")
-            gear_registry = {}
-            gear_links = []
-            try:
-                gear_payload = api.get("/gear-service/gear/filterGear",
-                                       params={"userProfilePk": str(profile_id)})
-                # Garmin's live filterGear contract returns an ARRAY of gear rows.
-                # Keep compatibility with the wrapped export-like shape too.
-                if isinstance(gear_payload, list) and len(gear_payload) == 1 and isinstance(gear_payload[0], dict) and "gearDTOS" in gear_payload[0]:
-                    gear_payload = gear_payload[0]
-                if isinstance(gear_payload, dict):
-                    gear_rows = gear_payload.get("gearDTOS", gear_payload.get("items", []))
-                    links_by_gear = gear_payload.get("gearActivityDTOs", {})
-                    if isinstance(links_by_gear, dict):
-                        for gear_id, links in links_by_gear.items():
-                            if isinstance(links, list):
-                                for link in links:
-                                    if isinstance(link, dict) and link.get("activityId") is not None:
-                                        gear_links.append({"activityId": str(link["activityId"]),
-                                                           "gear_id": str(link.get("gearPk", gear_id))})
-                elif isinstance(gear_payload, list):
-                    gear_rows = gear_payload
-                else:
-                    raise RuntimeError("Garmin gear endpoint returned an unexpected payload")
-                if not isinstance(gear_rows, list):
-                    raise RuntimeError("Garmin gear endpoint returned no gear list")
-                for item in gear_rows:
-                    if isinstance(item, dict):
-                        gid = item.get("gearPk") or item.get("uuid") or item.get("gearUUID")
-                        if gid is not None:
-                            gear_registry[str(gid)] = item
-            except Exception as gear_exc:
-                LOG.warning("Garmin gear registry unavailable: %s", gear_exc)
-
-            # The account-level endpoint returns gear only; activity assignments
-            # are exposed by the same endpoint filtered by activityId.
-            if gear_registry:
-                for activity in activities:
-                    summary = activity.get("summary", {})
-                    aid = summary.get("activityId") or summary.get("activity_id")
-                    if aid is None:
-                        continue
-                    try:
-                        linked = api.get("/gear-service/gear/filterGear",
-                                         params={"activityId": str(aid)})
-                        linked_rows = linked if isinstance(linked, list) else ([linked] if isinstance(linked, dict) else [])
-                        for gear in linked_rows:
-                            if not isinstance(gear, dict):
-                                continue
-                            gid = gear.get("gearPk") or gear.get("uuid") or gear.get("gearUUID")
-                            if gid is not None:
-                                gear_registry.setdefault(str(gid), gear)
-                                gear_links.append({"activityId": str(aid), "gear_id": str(gid)})
-                    except Exception as exc:
-                        LOG.warning("Gear lookup for activity %s unavailable: %s", aid, exc)
-            datasets["gear_registry"] = list(gear_registry.values())
-            datasets["gear_activity_links"] = gear_links
-            LOG.info("Gear: %d registry entries, %d activity links",
-                     len(datasets["gear_registry"]), len(gear_links))
-
-            vo2_rows = []
-            try:
-                vo2_rows = normalize_vo2_response(
-                    api.get(f"/metrics-service/metrics/maxmet/daily/{start_text}/{end_text}"))
-            except Exception as exc:
-                LOG.warning("VO2 range endpoint failed; trying per-day latest: %s", exc)
-            if not vo2_rows:
-                cursor = start
-                while cursor <= end:
-                    day = cursor.isoformat()
-                    try:
-                        vo2_rows.extend(normalize_vo2_response(
-                            api.get(f"/metrics-service/metrics/maxmet/latest/{day}"), day))
-                    except Exception as exc:
-                        if "404" not in str(exc):
-                            LOG.warning("VO2 %s failed: %s", day, exc)
-                    cursor += timedelta(days=1)
-            datasets["vo2_max_daily"] = vo2_rows
-            LOG.info("VO2 max: %d measurements", len(vo2_rows))
-
-            try:
-                readiness = api.get(
-                    f"/metrics-service/metrics/trainingreadiness/{start_text}/{end_text}")
-                datasets["training_readiness_daily"] = (
-                    readiness if isinstance(readiness, list) else
-                    [readiness] if isinstance(readiness, dict) else [])
-            except Exception as exc:
-                LOG.warning("Training readiness range unavailable; trying daily endpoints: %s", exc)
-                readiness_rows = []
-                cursor = start
-                while cursor <= end:
-                    day = cursor.isoformat()
-                    for path in (f"/metrics-service/metrics/trainingreadiness/{day}",
-                                 f"/metrics-service/metrics/trainingreadiness/daily/{day}"):
-                        try:
-                            value = api.get(path)
-                            if isinstance(value, list):
-                                readiness_rows.extend(value)
-                            elif isinstance(value, dict):
-                                readiness_rows.append(value)
-                            if any(isinstance(row, dict) and row.get("calendarDate") == day
-                                   for row in readiness_rows):
-                                break
-                        except Exception as daily_exc:
-                            if "404" not in str(daily_exc):
-                                LOG.warning("Readiness %s failed: %s", day, daily_exc)
-                    cursor += timedelta(days=1)
-                datasets["training_readiness_daily"] = readiness_rows
-            LOG.info("Training readiness: %d measurements",
-                     len(datasets["training_readiness_daily"]))
+    # Training readiness and gear are intentionally out of scope for this pilot.
 
     for source_name, command in RANGE_SOURCES.items():
         try:
