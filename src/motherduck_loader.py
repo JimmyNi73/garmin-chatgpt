@@ -67,11 +67,19 @@ def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
             activity_name VARCHAR, distance_m DOUBLE, duration_s DOUBLE,
             elapsed_duration_s DOUBLE, average_speed_m_s DOUBLE,
             average_hr DOUBLE, max_hr DOUBLE, calories DOUBLE,
-            average_run_cadence DOUBLE, max_run_cadence DOUBLE, vo2_max DOUBLE,
+            average_run_cadence DOUBLE, max_run_cadence DOUBLE, stride_length_mm DOUBLE,
+            aerobic_training_effect DOUBLE, activity_training_load DOUBLE, vo2_max DOUBLE,
             device_id VARCHAR, gear_id VARCHAR, source_payload JSON NOT NULL,
             source_run_id VARCHAR NOT NULL, loaded_at TIMESTAMPTZ NOT NULL
         )
     """)
+    # CREATE TABLE IF NOT EXISTS does not evolve existing tables.
+    for column, dtype in (
+        ("stride_length_mm", "DOUBLE"),
+        ("aerobic_training_effect", "DOUBLE"),
+        ("activity_training_load", "DOUBLE"),
+    ):
+        con.execute(f"ALTER TABLE core.activities ADD COLUMN IF NOT EXISTS {column} {dtype}")
     con.execute("""
         CREATE TABLE IF NOT EXISTS core.activity_workouts (
             activity_id VARCHAR NOT NULL, workout_index INTEGER NOT NULL,
@@ -193,28 +201,37 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
                     gear_data.get("gearPk") if isinstance(gear_data, dict) else None,
                     gear_data.get("gearId") if isinstance(gear_data, dict) else None,
                     s.get("gearId"))
+                detail = record.get("detail") if isinstance(record.get("detail"), dict) else {}
+                detail_summary = detail.get("summaryDTO") if isinstance(detail.get("summaryDTO"), dict) else {}
+                # Garmin API versions expose equivalent measures under different names.
+                def metric(*keys):
+                    for obj in (s, detail_summary, detail):
+                        value = _first(*(obj.get(key) for key in keys))
+                        if value is not None:
+                            return _as_float(value)
+                    return None
+                device_id = _first(
+                    s.get("deviceId"), detail.get("deviceId"),
+                    (record.get("device") or {}).get("device_id")
+                    if isinstance(record.get("device"), dict) else None)
                 core_rows.append((
                     str(activity_id), event_date(record), activity_type,
                     _first(s.get("activityName"), record.get("activityName")),
                     _as_float(s.get("distance")), _as_float(s.get("duration")),
                     _as_float(s.get("elapsedDuration")), _as_float(s.get("averageSpeed")),
                     _as_float(s.get("averageHR")), _as_float(s.get("maxHR")),
-                    _as_float(s.get("calories")), _as_float(s.get("averageRunCadence")),
-                    _as_float(s.get("maxRunCadence")), _as_float(s.get("vO2MaxValue")),
-                    str(_first(s.get("deviceId"),
-                        (record.get("device") or {}).get("device_id")
-                        if isinstance(record.get("device"), dict) else None,
-                        (record.get("detail") or {}).get("deviceId")
-                        if isinstance(record.get("detail"), dict) else None))
-                    if _first(s.get("deviceId"),
-                        (record.get("device") or {}).get("device_id")
-                        if isinstance(record.get("device"), dict) else None,
-                        (record.get("detail") or {}).get("deviceId")
-                        if isinstance(record.get("detail"), dict) else None) is not None else None,
+                    _as_float(s.get("calories")),
+                    metric("averageRunCadence", "averageRunningCadenceInStepsPerMinute", "avgRunCadence"),
+                    metric("maxRunCadence", "maxRunningCadenceInStepsPerMinute"),
+                    metric("avgStrideLength", "strideLength", "averageStrideLength"),
+                    metric("aerobicTrainingEffect", "trainingEffect"),
+                    metric("activityTrainingLoad", "trainingLoad"),
+                    metric("vO2MaxValue", "vo2Max", "vo2MaxValue"),
+                    str(device_id) if device_id is not None else None,
                     str(gear_id) if gear_id is not None else None,
                     _json(record), source_run_id, loaded_at))
             _bulk_insert(con, "core.activities", core_rows,
-                "?,TRY_CAST(? AS DATE),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?::JSON,?,?",
+                "?,TRY_CAST(? AS DATE),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?::JSON,?,?",
                 """ON CONFLICT (activity_id) DO UPDATE SET
                     activity_date=excluded.activity_date, activity_type=excluded.activity_type,
                     activity_name=excluded.activity_name, distance_m=excluded.distance_m,
@@ -222,8 +239,13 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
                     average_speed_m_s=excluded.average_speed_m_s, average_hr=excluded.average_hr,
                     max_hr=excluded.max_hr, calories=excluded.calories,
                     average_run_cadence=excluded.average_run_cadence,
-                    max_run_cadence=excluded.max_run_cadence, vo2_max=excluded.vo2_max,
-                    device_id=excluded.device_id, gear_id=excluded.gear_id,
+                    max_run_cadence=excluded.max_run_cadence,
+                    stride_length_mm=excluded.stride_length_mm,
+                    aerobic_training_effect=excluded.aerobic_training_effect,
+                    activity_training_load=excluded.activity_training_load,
+                    vo2_max=excluded.vo2_max,
+                    device_id=coalesce(excluded.device_id, core.activities.device_id),
+                    gear_id=coalesce(excluded.gear_id, core.activities.gear_id),
                     source_payload=excluded.source_payload, source_run_id=excluded.source_run_id,
                     loaded_at=excluded.loaded_at""")
             workout_rows = []
