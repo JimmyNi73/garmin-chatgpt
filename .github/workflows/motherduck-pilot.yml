@@ -40,7 +40,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: python -m pip install --upgrade garmin-connect-personal-api-python dropbox duckdb
+        run: python -m pip install --upgrade garmin-connect-personal-api-python dropbox duckdb==1.5.6
 
       - name: Validate Python syntax
         run: python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_export.py src/motherduck_backfill.py
