@@ -97,6 +97,23 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(con.execute("SELECT count(*) FROM raw.garmin_payloads").fetchone()[0], 1)
         self.assertEqual(con.execute("SELECT count(*) FROM core.daily_metrics").fetchone()[0], 0)
 
+    def test_null_timestamp_series_is_not_a_measurement(self):
+        con = duckdb.connect(":memory:")
+        self.addCleanup(con.close)
+        ensure_schema(con)
+        placeholder = {
+            "calendarDate": "2011-12-01",
+            "source_payload": {
+                "date": "2011-12-01",
+                "charged": None,
+                "drained": None,
+                "bodyBatteryValuesArray": [[1322697600001, None], [1322697600002, None]],
+            },
+        }
+        self.assertEqual(load_records(con, "body_battery", [placeholder], "test-run"), 1)
+        self.assertEqual(con.execute("SELECT count(*) FROM raw.garmin_payloads").fetchone()[0], 1)
+        self.assertEqual(con.execute("SELECT count(*) FROM core.daily_metrics").fetchone()[0], 0)
+
     def test_undated_rollup_stays_raw_only(self):
         con = duckdb.connect(":memory:")
         self.addCleanup(con.close)
