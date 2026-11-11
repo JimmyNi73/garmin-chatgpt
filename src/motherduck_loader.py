@@ -20,6 +20,37 @@ def _first(*values: Any) -> Any:
     return next((value for value in values if value is not None and value != ""), None)
 
 
+_NON_MEASUREMENT_KEYS = {
+    "date", "calendarDate", "startTimestampGMT", "startTimestampLocal",
+    "endTimestampGMT", "endTimestampLocal", "userProfilePK", "userProfilePk",
+    "uuid", "source", "id", "deviceRemCapable", "retro",
+}
+
+
+def _has_measurement_value(value: Any) -> bool:
+    """Return True only when a payload contains a measurement, not date scaffolding."""
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, dict):
+        return any(
+            _has_measurement_value(child)
+            for key, child in value.items()
+            if key not in _NON_MEASUREMENT_KEYS
+        )
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, list) and len(item) >= 2:
+                # Garmin time-series pairs are [timestamp, measurement].
+                if any(_has_measurement_value(part) for part in item[1:]):
+                    return True
+            elif _has_measurement_value(item):
+                return True
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return isinstance(value, (int, float))
+
+
 def stable_record_key(source_name: str, record: dict[str, Any], index: int) -> str:
     """Use Garmin natural IDs before fallback hashes; nested activity IDs win."""
     summary = _summary(record)
@@ -296,7 +327,12 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
             for index, record in enumerate(rows):
                 key = stable_record_key(source_name, record, index)
                 value = record.get("source_payload", record)
-                metric_rows.append((source_name, key, event_date(record), _json(value),
+                metric_date = event_date(record)
+                # Preserve every source response in RAW, but do not promote empty
+                # historical placeholders or undated endpoint envelopes to CORE.
+                if metric_date is None or not _has_measurement_value(value):
+                    continue
+                metric_rows.append((source_name, key, metric_date, _json(value),
                                     _json(record), source_run_id, loaded_at))
             _bulk_insert(con, "core.daily_metrics", metric_rows,
                 "?, ?, TRY_CAST(? AS DATE), ?::JSON, ?::JSON, ?, ?",
