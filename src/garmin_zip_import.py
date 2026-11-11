@@ -6,7 +6,7 @@ import logging
 import os
 import uuid
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -120,10 +120,15 @@ def main():
     zip_path = Path(os.environ.get("GARMIN_VALIDATION_ZIP", "Garmin_Connect_Export_2026-11-06.zip"))
     if not zip_path.is_file():
         raise FileNotFoundError(f"Validation ZIP not found: {zip_path}")
+    today = datetime.now(TZ).date()
+    # Validate only the portion of the ZIP snapshot that overlaps the current
+    # rolling 14-day test window. The ZIP itself ends on 2026-11-06.
+    zip_recent_start = max(date(2026, 10, 29), today - timedelta(days=13))
+    zip_recent_end = min(today, date(2026, 11, 6))
     windows = [
         ("2011-12", date(2011, 12, 1), date(2011, 12, 31)),
         ("2022-05", date(2022, 5, 1), date(2022, 5, 31)),
-        ("latest_zip", date(2026, 10, 29), date(2026, 11, 6)),
+        ("latest_zip", zip_recent_start, zip_recent_end),
     ]
     run_id = "zip-" + str(uuid.uuid4())
     with zipfile.ZipFile(zip_path) as zf:
