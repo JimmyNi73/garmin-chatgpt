@@ -58,7 +58,13 @@ def main():
     if not summaries:
         raise RuntimeError("Garmin returned zero activities across all three test windows")
 
-    gear_registry, activity_to_gear = fetch_gear_data(cli)
+    try:
+        gear_registry, activity_to_gear = fetch_gear_data(cli)
+    except Exception as exc:
+        # Match the established production exporter: the gear endpoint can
+        # return 404 for accounts without an available registry.
+        LOG.warning("Garmin gear registry unavailable (%s); using activity-level gear data only", exc)
+        gear_registry, activity_to_gear = {}, {}
     global_rows = {}
     errors = []
     for source, command in (("profile", "profile-settings"),
