@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, "src")
 import garmin_export as ge
+import motherduck_export as me
 
 
 class FakeCLI:
@@ -38,9 +39,34 @@ class ExportHelperTests(unittest.TestCase):
         self.assertEqual(rows[0]["gear"]["gear_id"], 42)
         self.assertEqual(rows[0]["gear"]["gear"]["customMakeModel"], "Saucony Triumph")
 
+    def test_gear_direct_activity_id_survives_unavailable_registry(self):
+        rows = [{"summary": {"activityId": 789}, "detail": {"gearPk": 17}}]
+        ge.enrich_gear_records(rows, {}, {})
+        self.assertEqual(rows[0]["gear"]["gear_id"], 17)
+        self.assertIsNone(rows[0]["gear"]["gear"])
+
     def test_unknown_device_is_null_not_guessed(self):
         row = ge.enrich_device_ids({"detail": {"deviceId": 999999}})
         self.assertIsNone(row["detail"]["device_model"])
+
+    def test_weight_samples_preserve_multiple_measurements_on_same_day(self):
+        payload = [
+            {"metaData": {"calendarDate": "2026-11-06T08:00:00.0", "sequence": 1},
+             "weight": {"weight": 84300.0}},
+            {"metaData": {"calendarDate": "2026-11-06T09:01:20.0", "sequence": 2},
+             "weight": {"weight": 84400.0}},
+        ]
+        rows = me.weight_measurement_rows(payload)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["calendarDate"] for row in rows}, {"2026-11-06"})
+
+    def test_date_index_reads_garmin_biometrics_metadata_date(self):
+        result = ge.date_index([
+            {"metaData": {"calendarDate": "2026-11-06T09:01:20.0"},
+             "weight": {"weight": 84300.0, "sourceType": "MANUAL"}}
+        ])
+        self.assertIn("2026-11-06", result["by_date"])
+        self.assertEqual(result["by_date"]["2026-11-06"]["weight"]["weight"], 84300.0)
 
     def test_month_health_clamps_range_to_today(self):
         class RecordingCLI:
@@ -88,6 +114,31 @@ class ExportHelperTests(unittest.TestCase):
             self.assertEqual(indexed["2026-11-07"]["value"], 22)
 
 
+    def test_optional_daily_treats_garmin_400_as_unavailable(self):
+        class Http400CLI:
+            def run(self, label, *args):
+                raise RuntimeError("HTTP 400 Bad Request")
+
+        unavailable = []
+        ok, value = ge.optional_daily(Http400CLI(), unavailable, "steps 2011-08-01",
+                                      "steps", "--date", "2011-08-01")
+        self.assertTrue(ok)
+        self.assertIsNone(value)
+        self.assertEqual(len(unavailable), 1)
+        self.assertIn("HTTP 400", unavailable[0]["reason"])
+
+    def test_optional_daily_recognizes_http_404(self):
+        class Http404CLI:
+            def run(self, label, *args):
+                raise RuntimeError("HTTP 404 Not Found")
+
+        unavailable = []
+        ok, value = ge.optional_daily(Http404CLI(), unavailable, "sleep 2021-08-01",
+                                      "sleep", "--date", "2021-08-01")
+        self.assertTrue(ok)
+        self.assertIsNone(value)
+        self.assertEqual(unavailable, [])
+
     def test_gear_only_backfill_preserves_non_gear_data(self):
         class FakeResponse:
             def __init__(self, content):
@@ -129,6 +180,9 @@ class ExportHelperTests(unittest.TestCase):
 
         dbx = FakeDropbox()
         original_output = ge.OUTPUT_DIR
+        original_write_mode = ge.WriteMode
+        # Keep this legacy Dropbox-helper unit test independent of the SDK.
+        ge.WriteMode = SimpleNamespace(overwrite="overwrite")
         with tempfile.TemporaryDirectory() as tmpdir:
             ge.OUTPUT_DIR = Path(tmpdir)
             try:
@@ -139,6 +193,7 @@ class ExportHelperTests(unittest.TestCase):
                 )
             finally:
                 ge.OUTPUT_DIR = original_output
+                ge.WriteMode = original_write_mode
 
         self.assertEqual((updated, activities, links), (2, 2, 1))
         historical = dbx.files["/History/garmin_history_2011-01.json"]

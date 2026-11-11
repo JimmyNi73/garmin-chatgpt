@@ -15,8 +15,12 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import dropbox
-from dropbox.files import WriteMode
+try:
+    import dropbox
+    from dropbox.files import WriteMode
+except ImportError:  # MotherDuck-only runs do not require the Dropbox SDK.
+    dropbox = None
+    WriteMode = None
 from garmin_personal_api.api_keys import resolve_api_key
 from garmin_personal_api.auth import PersonalApiAuthenticator
 from garmin_personal_api.client import GarminPersonalApiClient
@@ -146,12 +150,28 @@ def fetch_gear_data(cli: GarminCLI) -> tuple[dict[int, dict[str, Any]], dict[str
 def enrich_gear_records(rows: list[dict[str, Any]],
                         registry: dict[int, dict[str, Any]],
                         activity_to_gear: dict[str, int]) -> None:
+    """Enrich from the Garmin assignment map; fall back only to IDs in activity payloads."""
     for row in rows:
         summary = row.get("summary", {})
         aid = activity_id(summary) if isinstance(summary, dict) else None
         gear_id = activity_to_gear.get(aid) if aid else None
+        gear_payload = registry.get(gear_id) if gear_id is not None else None
+        if gear_id is None:
+            # Some Garmin activity details carry a direct gear primary key even
+            # when the separate gear registry endpoint is unavailable.
+            for source in (row.get("detail"), summary):
+                if not isinstance(source, dict):
+                    continue
+                candidate = source.get("gearPk", source.get("gearId", source.get("gear_id")))
+                try:
+                    gear_id = int(candidate) if candidate is not None else None
+                except (TypeError, ValueError):
+                    gear_id = None
+                if gear_id is not None:
+                    gear_payload = registry.get(gear_id)
+                    break
         row["gear"] = (
-            {"gear_id": gear_id, "gear": registry.get(gear_id)}
+            {"gear_id": gear_id, "gear": gear_payload}
             if gear_id is not None else None
         )
 
@@ -262,6 +282,8 @@ class GarminCLI:
 
 
 def dbx_client() -> dropbox.Dropbox:
+    if dropbox is None:
+        raise RuntimeError("Dropbox SDK is not installed; this execution path must not use Dropbox")
     required = ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN")
     missing = [k for k in required if not os.getenv(k)]
     if missing:
@@ -301,6 +323,8 @@ def read_dropbox(dbx: dropbox.Dropbox, path: str) -> dict[str, Any] | None:
 
 
 def upload_json(dbx: dropbox.Dropbox, path: str, value: dict[str, Any]) -> None:
+    if WriteMode is None:
+        raise RuntimeError("Dropbox SDK is not installed; cannot upload JSON")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     local = OUTPUT_DIR / path.rsplit("/", 1)[-1]
     local.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n",
@@ -440,7 +464,9 @@ def date_index(value: Any) -> dict[str, Any]:
         rows = [(None, x) for x in value]
     elif isinstance(value, dict):
         fields = ("calendarDate", "date", "startDate", "summaryDate")
-        if any(value.get(k) for k in fields):
+        if (any(value.get(k) for k in fields)
+                or (isinstance(value.get("metaData"), dict)
+                    and value["metaData"].get("calendarDate"))):
             rows = [(None, value)]
         else:
             for k in ("dailySummaries", "daily_summaries", "summaries",
@@ -464,6 +490,10 @@ def date_index(value: Any) -> dict[str, Any]:
                 if row.get(k):
                     d = str(row[k])[:10]
                     break
+        if not d and isinstance(row.get("metaData"), dict):
+            value = row["metaData"].get("calendarDate")
+            if value:
+                d = str(value)[:10]
         if d:
             indexed[d] = row
     return {"raw": value, "by_date": indexed}
@@ -659,7 +689,7 @@ def optional_daily(cli: GarminCLI, unavailable: list[dict[str, str]],
             return True, cli.run(label, *args)
         except Exception as exc:
             message = str(exc)
-            if re.search(r"HTTP\\s*5\\d\\d|timed out|timeout|temporar", message, re.I):
+            if re.search(r"HTTP\s*5\d\d|timed out|timeout|temporar", message, re.I):
                 if attempt < 3:
                     wait = 5 * attempt
                     LOG.warning("%s failed attempt %d/3; retrying in %d sec: %s",
@@ -670,8 +700,12 @@ def optional_daily(cli: GarminCLI, unavailable: list[dict[str, str]],
                             label, message)
                 unavailable.append({"source": label, "reason": "failed after 3 attempts: " + message})
                 return True, None
-            if re.search(r"\\b404\\b|no data available|no data for (?:this )?(?:date|period)", message, re.I):
+            if re.search(r"\b404\b|no data available|no data for (?:this )?(?:date|period)", message, re.I):
                 LOG.info("%s: no data available", label)
+                return True, None
+            if re.search(r"HTTP\s*400", message, re.I):
+                LOG.info("%s: Garmin reports no historical records for this date", label)
+                unavailable.append({"source": label, "reason": "Garmin HTTP 400; no records returned"})
                 return True, None
             raise
 

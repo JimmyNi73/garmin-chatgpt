@@ -1,0 +1,274 @@
+"""Full-history Garmin -> MotherDuck ingestion.
+
+Uses the same Garmin Personal API client and detail validation as garmin_export.py.
+No Dropbox reads/writes, month-partitioned database storage, or destructive
+database operations. Gear and weight metadata are fetched directly from Garmin.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import uuid
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from garmin_export import (
+    GarminCLI, activity_records, device_registry,
+    fetch_activities, fetch_month_health, fetch_gear_data, enrich_gear_records,
+)
+from motherduck_loader import connect, ensure_schema, load_records
+
+LOG = logging.getLogger("motherduck_export")
+TZ = ZoneInfo("Europe/Stockholm")
+def month_bounds(month: str) -> tuple[date, date]:
+    first = date.fromisoformat(month + "-01")
+    if first.month == 12:
+        next_month = date(first.year + 1, 1, 1)
+    else:
+        next_month = date(first.year, first.month + 1, 1)
+    return first, next_month - timedelta(days=1)
+
+
+def date_of(row: dict) -> str | None:
+    for key in ("calendarDate", "date", "measurementDate", "startTimeLocal",
+                "startTimeGMT", "startDate", "summaryDate"):
+        value = row.get(key)
+        if value:
+            return str(value)[:10]
+    metadata = row.get("metaData")
+    if isinstance(metadata, dict) and metadata.get("calendarDate"):
+        return str(metadata["calendarDate"])[:10]
+    return None
+
+
+def weight_measurement_rows(value: object) -> list[dict]:
+    """Find individual Garmin weight samples in nested/list API responses."""
+    found: list[dict] = []
+    seen: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+        weight = node.get("weight")
+        has_weight = (
+            isinstance(weight, dict) and weight.get("weight") is not None
+        ) or any(node.get(key) is not None for key in
+                 ("weightInGrams", "weightKg"))
+        if has_weight:
+            day = date_of(node)
+            if day:
+                key = json.dumps(node, sort_keys=True, ensure_ascii=False, default=str)
+                if key not in seen:
+                    seen.add(key)
+                    found.append({"calendarDate": day, "source_payload": node})
+        for child in node.values():
+            if isinstance(child, (dict, list)):
+                walk(child)
+
+    walk(value)
+    return found
+
+
+def health_records(source: str, health: dict, allowed_start: date,
+                   allowed_end: date) -> list[dict]:
+    """Flatten date-indexed and daily health data without collapsing same-day samples."""
+    out: list[dict] = []
+    range_data = health.get("range_data", {})
+    for metric, indexed in range_data.items():
+        if not isinstance(indexed, dict):
+            continue
+        by_date = indexed.get("by_date", {})
+        raw = indexed.get("raw")
+        if metric == "weight_measurements":
+            # date_index is date-grained and would overwrite same-day weigh-ins.
+            # Read the raw response first, then merge date-indexed fallbacks.
+            candidates = weight_measurement_rows(raw) if raw is not None else []
+            if isinstance(by_date, dict):
+                candidates.extend(
+                    {"calendarDate": str(day)[:10], "source_payload": payload}
+                    for day, payload in by_date.items() if isinstance(payload, dict)
+                )
+            seen_samples: set[str] = set()
+            for sample in candidates:
+                try:
+                    d = date.fromisoformat(sample["calendarDate"][:10])
+                except (KeyError, ValueError):
+                    continue
+                if not (allowed_start <= d <= allowed_end):
+                    continue
+                signature = json.dumps(sample, sort_keys=True, ensure_ascii=False, default=str)
+                if signature not in seen_samples:
+                    seen_samples.add(signature)
+                    out.append({"metric_source": metric, **sample})
+            continue
+        if isinstance(by_date, dict):
+            for day, payload in by_date.items():
+                try:
+                    d = date.fromisoformat(str(day)[:10])
+                except ValueError:
+                    continue
+                if allowed_start <= d <= allowed_end and isinstance(payload, dict):
+                    out.append({"metric_source": metric, "calendarDate": d.isoformat(),
+                                "source_payload": payload})
+        if raw is not None and not by_date:
+            # Retain unindexed source response as one complete RAW record.
+            out.append({"metric_source": metric, "calendarDate": None,
+                        "source_payload": raw})
+    for day, payload in health.get("by_date", {}).items():
+        try:
+            d = date.fromisoformat(str(day)[:10])
+        except ValueError:
+            continue
+        if not (allowed_start <= d <= allowed_end) or not isinstance(payload, dict):
+            continue
+        for metric, value in payload.items():
+            if value is not None:
+                out.append({"metric_source": metric, "calendarDate": d.isoformat(),
+                            "source_payload": value})
+    return out
+
+
+def main() -> None:
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
+                        format="%(asctime)s %(levelname)s %(message)s")
+    if not os.getenv("GARMIN_PERSONAL_API_KEY") or not os.getenv("MOTHERDUCK_TOKEN"):
+        raise RuntimeError("GARMIN_PERSONAL_API_KEY and MOTHERDUCK_TOKEN are required")
+    history_mode = os.getenv("GARMIN_HISTORY_MODE", "full").strip().lower()
+    if history_mode != "full":
+        raise RuntimeError("GARMIN_HISTORY_MODE must be 'full'; partial ingestion is not supported")
+    LOG.info("Configured ingestion mode: %s", history_mode)
+
+    today = datetime.now(TZ).date()
+    run_id = str(uuid.uuid4())
+    cli = GarminCLI()
+    datasets: dict[str, list[dict]] = {}
+    summaries_by_id: dict[str, dict] = {}
+
+    # Full Garmin history: fetch the activity index year-by-year, then retrieve
+    # every activity detail and every available monthly health period. No Dropbox
+    # dependency and no date sampling.
+    for year in range(2000, today.year + 1):
+        year_start = date(year, 1, 1)
+        year_end = min(date(year, 12, 31), today)
+        LOG.info("Fetching Garmin activity index for %d (%s..%s)", year, year_start, year_end)
+        year_summaries = fetch_activities(cli, year_start.isoformat(), year_end.isoformat())
+        for summary in year_summaries:
+            aid = summary.get("activityId", summary.get("activity_id", summary.get("id")))
+            if aid is None:
+                raise RuntimeError(f"Garmin activity index {year}: missing activityId")
+            summaries_by_id[str(aid)] = summary
+
+    if not summaries_by_id:
+        raise RuntimeError("Garmin returned no activity history; refusing an empty full load")
+    activity_dates = []
+    for summary in summaries_by_id.values():
+        stamp = summary.get("startTimeLocal") or summary.get("startTimeGMT")
+        if stamp:
+            try:
+                activity_dates.append(date.fromisoformat(str(stamp)[:10]))
+            except ValueError:
+                pass
+    if not activity_dates:
+        raise RuntimeError("Garmin activity index has no usable dates")
+    first_month = min(activity_dates).replace(day=1)
+    cursor = first_month
+    while cursor <= today:
+        month_start = cursor
+        next_month = (date(cursor.year + 1, 1, 1) if cursor.month == 12
+                      else date(cursor.year, cursor.month + 1, 1))
+        month_end = min(next_month - timedelta(days=1), today)
+        month = cursor.strftime("%Y-%m")
+        LOG.info("Fetching full-month Garmin health history %s (%s..%s)",
+                 month, month_start, month_end)
+        health = fetch_month_health(cli, month, today=today)
+        meta = health.get("metadata", {})
+        if meta.get("export_status") != "complete":
+            raise RuntimeError(f"Health source errors for {month}: {health.get('source_errors', [])}")
+        for row in health_records("health", health, month_start, month_end):
+            metric = row.pop("metric_source")
+            datasets.setdefault(metric, []).append(row)
+        cursor = next_month
+
+    summaries = list(summaries_by_id.values())
+    activities = activity_records(cli, summaries) if summaries else []
+    detail_ids = [str(row.get("summary", {}).get("activityId")) for row in activities]
+    expected_ids = set(summaries_by_id)
+    if len(detail_ids) != len(set(detail_ids)) or set(detail_ids) != expected_ids:
+        raise RuntimeError("Activity detail preflight failed; refusing all database writes")
+    # Gear is optional metadata: Garmin's gear endpoint may return 404 for this
+    # account/API version. Never discard valid activities because that endpoint is absent.
+    try:
+        gear_registry, activity_to_gear = fetch_gear_data(cli)
+    except Exception as exc:
+        LOG.warning("Garmin gear registry unavailable (%s); continuing with direct activity gear IDs only", exc)
+        gear_registry, activity_to_gear = {}, {}
+    enrich_gear_records(activities, gear_registry, activity_to_gear)
+    unknown_gear_ids = set(activity_to_gear.values()) - set(gear_registry)
+    if unknown_gear_ids:
+        LOG.warning("Garmin gear assignments reference IDs absent from registry: %s; retaining IDs without metadata",
+                    sorted(unknown_gear_ids))
+
+    datasets["activities"] = activities
+    datasets["devices"] = device_registry(activities)
+    datasets["gear_registry"] = [
+        {"gear_id": gear_id, **gear} for gear_id, gear in sorted(gear_registry.items())
+    ]
+
+    # VO2 is loaded only when present in documented activity summaries.
+    vo2 = []
+    for summary in summaries:
+        value = summary.get("vO2MaxValue")
+        stamp = summary.get("startTimeLocal") or summary.get("startTimeGMT")
+        if value is not None and stamp:
+            vo2.append({"calendarDate": str(stamp)[:10],
+                        "activityId": str(summary.get("activityId")),
+                        "vo2MaxValue": value, "source_payload": summary})
+    if vo2:
+        datasets["vo2_max"] = vo2
+    else:
+        LOG.warning("No VO2 values returned in documented activity summaries")
+
+    # De-duplicate exact health payloads while retaining distinct same-day samples.
+    for source, rows in list(datasets.items()):
+        unique = {}
+        for row in rows:
+            key = json.dumps(row, sort_keys=True, ensure_ascii=False, default=str)
+            unique[key] = row
+        datasets[source] = list(unique.values())
+
+    mapped_activities = sum(1 for row in activities if isinstance(row.get("gear"), dict)
+                            and row["gear"].get("gear_id") is not None)
+    weight_rows = len(datasets.get("weight_measurements", []))
+    if weight_rows == 0:
+        LOG.warning("Garmin returned no weight measurements in the selected windows; continuing without inventing or importing historical values")
+    LOG.info("FULL-HISTORY preflight passed: %d activities, %d with gear, %d Garmin gear items, "
+             "%d weight records, %d Garmin requests, sources=%s",
+             len(activities), mapped_activities, len(gear_registry), weight_rows,
+             cli.request_count, {name: len(rows) for name, rows in datasets.items()})
+
+    # No writes occur before all Garmin retrieval and activity completeness checks pass.
+    con = connect()
+    try:
+        ensure_schema(con)
+        total = 0
+        for source, rows in datasets.items():
+            total += load_records(con, source, rows, run_id)
+        model_path = Path(__file__).resolve().parents[1] / "sql" / "garmin_motherduck_model.sql"
+        con.execute(model_path.read_text(encoding="utf-8"))
+        counts = con.execute("""
+            SELECT source_name, count(*) FROM raw.garmin_payloads
+            GROUP BY source_name ORDER BY source_name
+        """).fetchall()
+        LOG.info("Garmin full-history ingestion succeeded: run=%s loaded=%d counts=%s", run_id, total, counts)
+    finally:
+        con.close()
+
+
+if __name__ == "__main__":
+    main()
