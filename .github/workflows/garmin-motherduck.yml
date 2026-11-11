@@ -79,4 +79,4 @@ jobs:
           python src/motherduck_export.py
           GARMIN_VALIDATION_ZIP="Garmin_Connect_Export_2026-11-06.zip" python src/garmin_zip_import.py
 
-# [run-garmin-test] Re-run after ZIP validator fixes: dates and kcal tolerance.
+# [run-garmin-test] Validate corrected activity comparisons and deduplicated sleep/weight views.
