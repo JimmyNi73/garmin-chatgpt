@@ -711,17 +711,18 @@ def optional_daily(cli: GarminCLI, unavailable: list[dict[str, str]],
 
 
 def fetch_month_health(cli: GarminCLI, month: str,
-                      today: date | None = None) -> dict[str, Any]:
-    """Fetch health data for a month, never requesting dates later than today."""
+                      today: date | None = None,
+                      full_month: bool = False) -> dict[str, Any]:
+    """Fetch month health; full_month=True includes month-to-date for full refreshes."""
     month_start, month_end = month_bounds(month)
     run_date = today or datetime.now(TZ).date()
     end_date = min(date.fromisoformat(month_end), run_date)
-    if month == run_date.strftime("%Y-%m"):
-        # Current health snapshot: inclusive 30-day window, always ending today.
+    if month == run_date.strftime("%Y-%m") and not full_month:
+        # Incremental maintenance uses an inclusive 30-day window.
         start_date = run_date - timedelta(days=29)
         history_scope = "rolling_30_days"
     else:
-        # Historical recovery keeps the original complete-month behavior.
+        # Full-history refreshes fetch from the first day, including this month.
         start_date = date.fromisoformat(month_start)
         history_scope = "full_month_all_available_dates"
     start = start_date.isoformat()
@@ -755,17 +756,35 @@ def fetch_month_health(cli: GarminCLI, month: str,
                 _, segment_end_text = month_bounds(cursor.strftime("%Y-%m"))
                 segment_end = min(date.fromisoformat(segment_end_text), end_date)
                 segment_label = f"{command} {cursor.strftime('%Y-%m')}"
-                ok, value = optional_range(
-                    cli, errors, unavailable, segment_label,
-                    command, "--start-date", cursor.isoformat(),
-                    "--end-date", segment_end.isoformat())
-                if ok and value is not None:
-                    indexed = date_index(value)
-                    merged_by_date.update(indexed["by_date"])
-                    raw_parts.append(value)
-                    successful_parts += 1
-                elif any(item["source"] == segment_label for item in unavailable):
-                    unavailable_parts += 1
+                def fetch_segment(seg_start: date, seg_end: date) -> None:
+                    nonlocal successful_parts, unavailable_parts
+                    label = f"{command} {seg_start}..{seg_end}"
+                    before = len(unavailable)
+                    ok, segment_value = optional_range(
+                        cli, errors, unavailable, label,
+                        command, "--start-date", seg_start.isoformat(),
+                        "--end-date", seg_end.isoformat())
+                    was_http400 = any(
+                        item["source"] == label and "HTTP 400" in item.get("reason", "")
+                        for item in unavailable[before:]
+                    )
+                    if was_http400 and seg_start < seg_end:
+                        # Garmin sometimes rejects a valid month-sized range.
+                        # Bisect it to isolate unsupported/no-data dates instead
+                        # of silently dropping an entire month of measurements.
+                        del unavailable[before:]
+                        midpoint = seg_start + (seg_end - seg_start) // 2
+                        fetch_segment(seg_start, midpoint)
+                        fetch_segment(midpoint + timedelta(days=1), seg_end)
+                    elif ok and segment_value is not None:
+                        indexed = date_index(segment_value)
+                        merged_by_date.update(indexed["by_date"])
+                        raw_parts.append(segment_value)
+                        successful_parts += 1
+                    elif was_http400:
+                        unavailable_parts += 1
+
+                fetch_segment(cursor, segment_end)
                 cursor = segment_end + timedelta(days=1)
             result = {"raw": raw_parts, "by_date": merged_by_date}
             if unavailable_parts and successful_parts:
