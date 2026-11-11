@@ -1,4 +1,4 @@
-name: Garmin to MotherDuck | Full History
+name: Garmin to MotherDuck | Bounded Test
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       confirm_run:
-        description: "Type START to confirm the final full-history Garmin load"
+        description: "Type TEST to confirm truncate + three-window test load"
         required: true
         type: string
 
@@ -20,9 +20,9 @@ concurrency:
 
 jobs:
   ingest:
-    if: ${{ (github.event_name == 'push' && contains(github.event.head_commit.message, '[run-garmin]')) || inputs.confirm_run == 'START' }}
+    if: ${{ (github.event_name == 'push' && contains(github.event.head_commit.message, '[run-garmin-test]')) || inputs.confirm_run == 'TEST' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 180
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -41,7 +41,7 @@ jobs:
       - name: Validate ingestion logic
         run: python -m unittest discover -s checks -p '*_checks.py' -v
 
-      - name: Load complete Garmin history into MotherDuck
+      - name: Truncate and load three test windows into MotherDuck
         env:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
@@ -49,6 +49,8 @@ jobs:
           GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
           GARMIN_BATCH_PAUSE_SECONDS: "5"
           GARMIN_MAX_RETRIES: "8"
-          GARMIN_HISTORY_MODE: "full"
+          GARMIN_HISTORY_MODE: "test"
+          GARMIN_TEST_MONTH_2011: "2011-12"
+          GARMIN_TEST_MONTH_2022: "2022-05"
           MOTHERDUCK_BATCH_SIZE: "100"
         run: python src/motherduck_export.py
