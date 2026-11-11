@@ -1,6 +1,13 @@
 name: Garmin to MotherDuck | Run & Maintain
 
 on:
+  push:
+    branches:
+      - feature/run-maintain
+    paths:
+      - "src/motherduck_maintain.py"
+      - "src/motherduck_loader.py"
+      - ".github/workflows/garmin-motherduck-maintain.yml"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -43,7 +50,7 @@ jobs:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
           GARMIN_HISTORY_MODE: incremental
-          GARMIN_MOTHERDUCK_DRY_RUN: ${{ inputs.dry_run }}
+          GARMIN_MOTHERDUCK_DRY_RUN: ${{ github.event_name == 'push' && 'true' || inputs.dry_run }}
           GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
           GARMIN_BATCH_PAUSE_SECONDS: "5"
           GARMIN_MAX_RETRIES: "8"
