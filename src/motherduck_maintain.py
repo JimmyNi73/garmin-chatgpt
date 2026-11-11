@@ -25,6 +25,7 @@ from garmin_export import (
     fetch_activities,
     fetch_gear_data,
     fetch_month_health,
+    optional,
 )
 from motherduck_export import health_records
 from motherduck_loader import load_records, stable_record_key
@@ -216,6 +217,18 @@ def main() -> None:
         health_rows.extend(_validate_health(health, month_start, month_end))
         month_cursor = next_month
     health_by_source = _group_health(health_rows)
+
+    # Match the Dropbox export's global Garmin metadata directly from Garmin.
+    # These are source payloads, not values reconstructed from archived JSON.
+    global_errors: list[dict[str, str]] = []
+    for source, command in (("profile", "profile-settings"),
+                            ("heart_rate_zones", "heart-rate-zones")):
+        ok, value = optional(cli, global_errors, command, command)
+        if not ok:
+            raise RuntimeError(f"Garmin global source retrieval failed: {global_errors}")
+        if value is not None:
+            health_by_source[source] = [{"calendarDate": None,
+                                        "source_payload": value}]
 
     try:
         gear_registry, activity_to_gear = fetch_gear_data(cli)
