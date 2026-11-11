@@ -57,9 +57,11 @@ def weight_measurement_rows(value: object) -> list[dict]:
             return
         weight = node.get("weight")
         has_weight = (
-            isinstance(weight, dict) and weight.get("weight") is not None
-        ) or any(node.get(key) is not None for key in
-                 ("weightInGrams", "weightKg"))
+            (isinstance(weight, dict) and weight.get("weight") is not None)
+            or (isinstance(weight, (int, float)) and not isinstance(weight, bool)
+                and date_of(node) is not None)
+            or any(node.get(key) is not None for key in ("weightInGrams", "weightKg"))
+        )
         if has_weight:
             day = date_of(node)
             if day:
