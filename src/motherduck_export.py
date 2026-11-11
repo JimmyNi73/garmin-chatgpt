@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from garmin_export import (
     GarminCLI, activity_records, device_registry,
     fetch_activities, fetch_month_health, fetch_gear_data, enrich_gear_records,
+    optional,
 )
 from motherduck_loader import connect, ensure_schema, load_records
 
@@ -201,6 +202,17 @@ def main() -> None:
         LOG.warning("Garmin gear registry unavailable (%s); continuing with direct activity gear IDs only", exc)
         gear_registry, activity_to_gear = {}, {}
 
+    # Capture the same global Garmin metadata as the Dropbox JSON exporter.
+    global_records: dict[str, list[dict]] = {}
+    global_errors: list[dict[str, str]] = []
+    for source, command in (("profile", "profile-settings"),
+                            ("heart_rate_zones", "heart-rate-zones")):
+        ok, value = optional(cli, global_errors, command, command)
+        if not ok:
+            raise RuntimeError(f"Garmin global source retrieval failed: {global_errors}")
+        if value is not None:
+            global_records[source] = [{"calendarDate": None, "source_payload": value}]
+
     con = connect()
     total_loaded = 0
     activity_count = 0
@@ -208,6 +220,9 @@ def main() -> None:
     weight_rows = 0
     try:
         ensure_schema(con)
+
+        for source, rows in global_records.items():
+            total_loaded += load_in_batches(con, source, rows, run_id, batch_size)
 
         # Health is fetched and committed one month at a time. A failed later
         # month does not discard earlier committed work; stable keys make reruns
