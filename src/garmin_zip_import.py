@@ -149,7 +149,8 @@ def main():
             # and the ZIP wellness records now represented in CORE.
             failures = []
             for label, start, end in windows[:2]:
-                exp_rows = expected[label]["activities"]\n                exp_ids = set(exp_rows)
+                exp_rows = expected[label]["activities"]
+                exp_ids = set(exp_rows)
                 db_ids = {
                     r[0] for r in con.execute(
                         "SELECT activity_id FROM core.activities WHERE activity_date BETWEEN ? AND ?",
