@@ -79,4 +79,4 @@ jobs:
           python src/motherduck_export.py
           GARMIN_VALIDATION_ZIP="Garmin_Connect_Export_2026-11-06.zip" python src/garmin_zip_import.py
 
-# [run-garmin-test] Latest test supersedes stale queued runs; validate all data fixes.
+# [run-garmin-test] ZIP-backed validation includes activity field comparisons and de-duplicated source samples.
