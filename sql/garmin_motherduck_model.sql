@@ -93,7 +93,7 @@ normalized AS (
 ranked AS (
     SELECT *,
         row_number() OVER (
-            PARTITION BY resolved_date, resolved_weight_kg, normalized_timestamp
+            PARTITION BY resolved_date, resolved_weight_kg, date_trunc('second', normalized_timestamp)
             ORDER BY loaded_at DESC, record_key
         ) AS sample_rank
     FROM normalized
