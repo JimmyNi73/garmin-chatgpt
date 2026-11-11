@@ -93,18 +93,26 @@ def build_zip_records(zf: zipfile.ZipFile, start: date, end: date) -> dict[str, 
     return records
 
 
-def activity_ids(zf: zipfile.ZipFile, start: date, end: date) -> set[str]:
-    ids = set()
+def activity_summaries(zf: zipfile.ZipFile, start: date, end: date) -> dict[str, dict]:
+    found = {}
     for name in zf.namelist():
         if "summarizedActivities" not in name:
             continue
         payload = read_json(zf, name)
-        rows = payload.get("summarizedActivitiesExport", []) if isinstance(payload, dict) else []
+        if isinstance(payload, list):
+            rows = [row for item in payload if isinstance(item, dict)
+                    for row in item.get("summarizedActivitiesExport", [])]
+        else:
+            rows = payload.get("summarizedActivitiesExport", [])
         for row in rows:
             day = activity_date(row)
             if day and in_window(day, start, end):
-                ids.add(str(row.get("activityId")))
-    return ids
+                found[str(row.get("activityId"))] = row
+    return found
+
+
+def activity_ids(zf: zipfile.ZipFile, start: date, end: date) -> set[str]:
+    return set(activity_summaries(zf, start, end))
 
 
 def main():
@@ -125,7 +133,7 @@ def main():
             expected = {}
             for label, start, end in windows:
                 expected[label] = {
-                    "activities": activity_ids(zf, start, end),
+                    "activities": activity_summaries(zf, start, end),
                     "sources": build_zip_records(zf, start, end),
                 }
                 for source, rows in expected[label]["sources"].items():
@@ -141,7 +149,7 @@ def main():
             # and the ZIP wellness records now represented in CORE.
             failures = []
             for label, start, end in windows[:2]:
-                exp_ids = expected[label]["activities"]
+                exp_rows = expected[label]["activities"]\n                exp_ids = set(exp_rows)
                 db_ids = {
                     r[0] for r in con.execute(
                         "SELECT activity_id FROM core.activities WHERE activity_date BETWEEN ? AND ?",
@@ -150,6 +158,33 @@ def main():
                 missing = sorted(exp_ids - db_ids)
                 if missing:
                     failures.append(f"{label}: {len(missing)} ZIP activities missing from CORE: {missing[:10]}")
+                for aid, source_row in exp_rows.items():
+                    db_row = con.execute(
+                        """SELECT activity_date, distance_m, duration_s, average_hr, max_hr, calories
+                           FROM core.activities WHERE activity_id=?""", [aid]).fetchone()
+                    if not db_row:
+                        continue
+                    expected_values = (
+                        activity_date(source_row),
+                        (float(source_row["distance"]) / 100.0) if source_row.get("distance") is not None else None,
+                        (float(source_row["duration"]) / 1000.0) if source_row.get("duration") is not None else None,
+                        float(source_row["avgHr"]) if source_row.get("avgHr") is not None else None,
+                        float(source_row["maxHr"]) if source_row.get("maxHr") is not None else None,
+                        (float(source_row["calories"]) / 4.184) if source_row.get("calories") is not None else None,
+                    )
+                    actual_values = (
+                        str(db_row[0]) if db_row[0] is not None else None,
+                        *[float(v) if v is not None else None for v in db_row[1:]],
+                    )
+                    for field, expected_value, actual_value in zip(
+                        ("date", "distance_m", "duration_s", "average_hr", "max_hr", "calories"),
+                        expected_values, actual_values,
+                    ):
+                        if expected_value is None or actual_value is None:
+                            if expected_value != actual_value:
+                                failures.append(f"{label}/{aid}/{field}: ZIP={expected_value}, DB={actual_value}")
+                        elif abs(float(expected_value) - float(actual_value)) > 0.05:
+                            failures.append(f"{label}/{aid}/{field}: ZIP={expected_value}, DB={actual_value}")
                 for source, rows in expected[label]["sources"].items():
                     actual = con.execute(
                         "SELECT count(*) FROM core.daily_metrics WHERE metric_source=? AND metric_date BETWEEN ? AND ?",
