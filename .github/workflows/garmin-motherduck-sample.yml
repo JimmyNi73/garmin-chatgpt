@@ -1,0 +1,43 @@
+name: Garmin to MotherDuck | Sample validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: garmin-motherduck-production
+  cancel-in-progress: false
+
+jobs:
+  sample-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade garmin-connect-personal-api-python duckdb==1.5.6
+
+      - name: Validate Python syntax and loader tests
+        run: |
+          python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_export.py src/motherduck_sample_test.py
+          python -m unittest discover -s checks -p '*_checks.py' -v
+
+      - name: Garmin API sample load, truncate and deep validation
+        env:
+          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+          MOTHERDUCK_DATABASE: garmin_github
+          GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
+          GARMIN_BATCH_PAUSE_SECONDS: "5"
+          GARMIN_MAX_RETRIES: "8"
+          MOTHERDUCK_BATCH_SIZE: "100"
+        run: python src/motherduck_sample_test.py
