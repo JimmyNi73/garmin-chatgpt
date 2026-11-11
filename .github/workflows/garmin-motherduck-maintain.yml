@@ -50,7 +50,7 @@ jobs:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
           GARMIN_HISTORY_MODE: incremental
-          GARMIN_MOTHERDUCK_DRY_RUN: ${{ github.event_name == 'push' && 'false' || inputs.dry_run }}
+          GARMIN_MOTHERDUCK_DRY_RUN: ${{ github.event_name == 'push' && 'true' || inputs.dry_run }}
           GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
           GARMIN_BATCH_PAUSE_SECONDS: "5"
           GARMIN_MAX_RETRIES: "8"
