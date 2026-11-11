@@ -51,6 +51,9 @@ FROM core.daily_metrics;
 -- Garmin weight_measurements may expose weight as a scalar (grams) or as the
 -- nested weight object used by Garmin's biometrics export. Keep individual
 -- same-day measurements distinct using the stable record_key.
+-- Normalize both ISO timestamps and Garmin epoch-millisecond timestamps.
+-- API and ZIP snapshots can contain the same weigh-in; deduplicate only when
+-- date, measured weight and actual timestamp agree, preserving separate same-day samples.
 CREATE OR REPLACE VIEW core.weight AS
 WITH parsed AS (
     SELECT *,
@@ -66,22 +69,43 @@ WITH parsed AS (
         ) AS weight_timestamp
     FROM core.daily_metrics
     WHERE lower(metric_source) LIKE '%weight%'
+),
+normalized AS (
+    SELECT *,
+        CASE
+            WHEN regexp_matches(weight_timestamp, '^[0-9]{13}$')
+                THEN to_timestamp(try_cast(weight_timestamp AS DOUBLE) / 1000.0)
+            ELSE try_cast(weight_timestamp AS TIMESTAMPTZ)
+        END AS normalized_timestamp,
+        coalesce(
+            metric_date,
+            try_cast(json_extract_string(metric_value, '$.calendarDate') AS DATE)
+        ) AS resolved_date,
+        CASE
+            WHEN weight_grams IS NOT NULL THEN weight_grams / 1000.0
+            ELSE coalesce(
+                try_cast(json_extract_string(metric_value, '$.weightKg') AS DOUBLE),
+                try_cast(json_extract_string(metric_value, '$.weight.weightKg') AS DOUBLE)
+            )
+        END AS resolved_weight_kg
+    FROM parsed
+),
+ranked AS (
+    SELECT *,
+        row_number() OVER (
+            PARTITION BY resolved_date, resolved_weight_kg, normalized_timestamp
+            ORDER BY loaded_at DESC, record_key
+        ) AS sample_rank
+    FROM normalized
+    WHERE resolved_weight_kg IS NOT NULL
 )
 SELECT
     record_key,
-    coalesce(metric_date,
-             try_cast(try_cast(weight_timestamp AS TIMESTAMPTZ) AS DATE),
-             try_cast(json_extract_string(metric_value, '$.calendarDate') AS DATE)) AS measurement_date,
+    resolved_date AS measurement_date,
     try_cast(json_extract_string(metric_value, '$.from') AS BIGINT) AS period_start_ms,
     try_cast(json_extract_string(metric_value, '$.until') AS BIGINT) AS period_end_ms,
-    try_cast(weight_timestamp AS TIMESTAMPTZ) AS measurement_timestamp,
-    CASE
-        WHEN weight_grams IS NOT NULL THEN weight_grams / 1000.0
-        ELSE coalesce(
-            try_cast(json_extract_string(metric_value, '$.weightKg') AS DOUBLE),
-            try_cast(json_extract_string(metric_value, '$.weight.weightKg') AS DOUBLE)
-        )
-    END AS weight_kg,
+    normalized_timestamp AS measurement_timestamp,
+    resolved_weight_kg AS weight_kg,
     coalesce(
         try_cast(json_extract_string(metric_value, '$.bmi') AS DOUBLE),
         try_cast(json_extract_string(metric_value, '$.weight.bmi') AS DOUBLE)
@@ -108,10 +132,8 @@ SELECT
     ) AS visceral_fat,
     metric_value AS source_value,
     source_payload
-FROM parsed
-WHERE weight_grams IS NOT NULL
-   OR json_extract(metric_value, '$.weightKg') IS NOT NULL
-   OR json_extract(metric_value, '$.weight.weightKg') IS NOT NULL;
+FROM ranked
+WHERE sample_rank = 1;
 
 -- Expose one canonical sleep record per date. Prefer the dedicated daily
 -- summary, then the ZIP sleep export, then the legacy daily sleep endpoint.
