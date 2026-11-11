@@ -75,7 +75,9 @@ def main():
         cursor = start.replace(day=1)
         while cursor <= end:
             month = cursor.strftime("%Y-%m")
-            next_month = date(cursor.year + (cursor.month == 12), cursor.month % 12 + 1, 1)\n            month_end = next_month - timedelta(days=1)\n            month_windows.setdefault(month, []).append((max(start, cursor), min(end, month_end)))
+            next_month = date(cursor.year + (cursor.month == 12), cursor.month % 12 + 1, 1)
+            month_end = next_month - timedelta(days=1)
+            month_windows.setdefault(month, []).append((max(start, cursor), min(end, month_end)))
             cursor = (date(cursor.year + (cursor.month == 12), cursor.month % 12 + 1, 1))
     for month in sorted(month_windows):
         health = fetch_month_health(cli, month, today=today, full_month=True)
