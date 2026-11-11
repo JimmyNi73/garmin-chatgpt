@@ -136,13 +136,14 @@ def main():
                     "activities": activity_summaries(zf, start, end),
                     "sources": build_zip_records(zf, start, end),
                 }
-                for source, rows in expected[label]["sources"].items():
+                for source, rows in list(expected[label]["sources"].items()):
                     # Stable keys preserve multiple measurements on the same date.
                     unique = {}
                     for i, row in enumerate(rows):
                         key = row.get("zip_record_key") or f"{row['calendarDate']}:{i}"
                         row["zip_record_key"] = key
                         unique[key] = row
+                    expected[label]["sources"][source] = list(unique.values())
                     load_records(con, source, unique.values(), run_id)
 
             # Validate the two requested historical months against ZIP activity IDs
