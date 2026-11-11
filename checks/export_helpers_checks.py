@@ -60,6 +60,22 @@ class ExportHelperTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual({row["calendarDate"] for row in rows}, {"2026-11-06"})
 
+    def test_weight_samples_parse_scalar_weight_in_daily_weight_summaries(self):
+        sample = {
+            "calendarDate": "2022-05-31",
+            "timestampGMT": 1653979050007,
+            "weight": 87500.0,
+            "sourceType": "MANUAL",
+        }
+        payload = {"dailyWeightSummaries": [{
+            "allWeightMetrics": [sample],
+            "latestWeight": sample,
+        }]}
+        rows = me.weight_measurement_rows(payload)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["calendarDate"], "2022-05-31")
+        self.assertEqual(rows[0]["source_payload"]["weight"], 87500.0)
+
     def test_date_index_reads_garmin_biometrics_metadata_date(self):
         result = ge.date_index([
             {"metaData": {"calendarDate": "2026-11-06T09:01:20.0"},
