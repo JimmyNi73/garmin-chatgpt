@@ -1,7 +1,7 @@
-"""Incremental Garmin -> MotherDuck maintenance (rolling 14-day overlap).
+"""Incremental Garmin -> MotherDuck maintenance (rolling 30-day overlap).
 
 This entrypoint is intentionally incapable of full-history ingestion. It fetches
-only the last 14 days, validates the complete payload before writing, and uses
+only the last 30 days, validates the complete payload before writing, and uses
 the idempotent loader to upsert existing natural keys.
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ from motherduck_loader import load_records, stable_record_key
 LOG = logging.getLogger("motherduck_maintain")
 TZ = ZoneInfo("Europe/Stockholm")
 DATABASE = "garmin_github"
-WINDOW_DAYS = 14
+WINDOW_DAYS = 30
 BATCH_SIZE = 100
 
 
@@ -197,13 +197,24 @@ def main() -> None:
 
     # Fetch and validate everything before opening a write-capable database session.
     summaries = fetch_activities(cli, start.isoformat(), today.isoformat())
-    if not summaries:
-        raise RuntimeError("Garmin returned no activities for the rolling window; refusing run")
-    details = activity_records(cli, summaries)
+    details = activity_records(cli, summaries) if summaries else []
     _validate_activities(summaries, details, start, today)
 
-    health = fetch_month_health(cli, today.strftime("%Y-%m"), today=today)
-    health_rows = _validate_health(health, start, today)
+    # Fetch every calendar month touched by the rolling window. A 30-day
+    # window crosses month boundaries for most dates near month start.
+    health_rows: list[dict] = []
+    month_cursor = start.replace(day=1)
+    while month_cursor <= today:
+        next_month = (date(month_cursor.year + 1, 1, 1) if month_cursor.month == 12
+                      else date(month_cursor.year, month_cursor.month + 1, 1))
+        month_end = min(next_month - timedelta(days=1), today)
+        month_start = max(month_cursor, start)
+        month = month_cursor.strftime("%Y-%m")
+        LOG.info("Fetching Garmin health month=%s window=%s..%s",
+                 month, month_start, month_end)
+        health = fetch_month_health(cli, month, today=today)
+        health_rows.extend(_validate_health(health, month_start, month_end))
+        month_cursor = next_month
     health_by_source = _group_health(health_rows)
 
     try:
