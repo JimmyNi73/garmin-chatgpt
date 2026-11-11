@@ -33,6 +33,17 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install --upgrade duckdb==1.5.6 garmin-connect-personal-api-python
       - name: Validate Python syntax
-        run: python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_export.py src/motherduck_maintain.py
+        run: python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_export.py src/motherduck_maintain.py src/motherduck_sample_test.py
       - name: Run unit tests
         run: python -m unittest discover -s checks -p '*_checks.py' -v
+      - name: Run bounded Garmin sample load and deep validation
+        if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[run-sample-garmin]') }}
+        env:
+          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+          MOTHERDUCK_DATABASE: garmin_github
+          GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
+          GARMIN_BATCH_PAUSE_SECONDS: "5"
+          GARMIN_MAX_RETRIES: "8"
+          MOTHERDUCK_BATCH_SIZE: "100"
+        run: python src/motherduck_sample_test.py
