@@ -119,6 +119,20 @@ def health_records(source: str, health: dict, allowed_start: date,
                     out.append({"metric_source": metric, "calendarDate": d.isoformat(),
                                 "source_payload": payload})
         if raw is not None and not by_date:
+            # HRV summaries are returned as a rolling range, even when the caller
+            # requested a narrower month/test window. Clip nested dates before
+            # retaining the raw envelope so no out-of-window days leak into RAW.
+            if metric == "hrv_summaries" and isinstance(raw, dict):
+                raw = dict(raw)
+                for key in ("hrvSummaries", "hrv_summaries"):
+                    items = raw.get(key)
+                    if isinstance(items, list):
+                        raw[key] = [
+                            item for item in items
+                            if isinstance(item, dict)
+                            and date_of(item) is not None
+                            and allowed_start <= date.fromisoformat(date_of(item)) <= allowed_end
+                        ]
             # Retain unindexed source response as one complete RAW record.
             out.append({"metric_source": metric, "calendarDate": None,
                         "source_payload": raw})
