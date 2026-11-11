@@ -80,6 +80,35 @@ class LoaderTests(unittest.TestCase):
         """).fetchone()
         self.assertEqual(actual, (49.5, "device-1", "gear-1", 1120.0, 3.4, 68.0))
 
+    def test_empty_health_placeholder_stays_raw_only(self):
+        con = duckdb.connect(":memory:")
+        self.addCleanup(con.close)
+        ensure_schema(con)
+        empty = {
+            "calendarDate": "2011-12-01",
+            "source_payload": {
+                "calendarDate": "2011-12-01",
+                "restingHeartRate": None,
+                "maxHeartRate": None,
+                "heartRateValues": None,
+            },
+        }
+        self.assertEqual(load_records(con, "heart_rate", [empty], "test-run"), 1)
+        self.assertEqual(con.execute("SELECT count(*) FROM raw.garmin_payloads").fetchone()[0], 1)
+        self.assertEqual(con.execute("SELECT count(*) FROM core.daily_metrics").fetchone()[0], 0)
+
+    def test_undated_rollup_stays_raw_only(self):
+        con = duckdb.connect(":memory:")
+        self.addCleanup(con.close)
+        ensure_schema(con)
+        rollup = {
+            "calendarDate": None,
+            "source_payload": {"hrvSummaries": [{"calendarDate": "2026-11-10", "lastNightAvg": 62}]},
+        }
+        self.assertEqual(load_records(con, "hrv_summaries", [rollup], "test-run"), 1)
+        self.assertEqual(con.execute("SELECT count(*) FROM raw.garmin_payloads").fetchone()[0], 1)
+        self.assertEqual(con.execute("SELECT count(*) FROM core.daily_metrics").fetchone()[0], 0)
+
     def test_bulk_activity_and_metric_loads(self):
         con = duckdb.connect(":memory:")
         self.addCleanup(con.close)
