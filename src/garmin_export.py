@@ -790,7 +790,8 @@ def fetch_month_health(cli: GarminCLI, month: str,
         day = (first + timedelta(days=offset)).isoformat()
         daily_row: dict[str, Any] = {}
         for field, command in (("sleep", "sleep"), ("heart_rate", "heart-rate"),
-                               ("hrv", "hrv"), ("spo2", "spo2")):
+                               ("hrv", "hrv"), ("spo2", "spo2"),
+                               ("fitness_age", "fitness-age")):
             ok, value = optional_daily(cli, unavailable, f"{command} {day}",
                                        command, "--date", day)
             daily_row[field] = enrich_device_ids(value) if ok else None
