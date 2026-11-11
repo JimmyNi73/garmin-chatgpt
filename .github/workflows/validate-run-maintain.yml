@@ -1,0 +1,38 @@
+name: Validate Garmin Run & Maintain
+
+on:
+  push:
+    branches:
+      - feature/run-maintain
+    paths:
+      - "src/**"
+      - "checks/**"
+      - ".github/workflows/validate-run-maintain.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "checks/**"
+      - ".github/workflows/validate-run-maintain.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: python -m pip install --upgrade duckdb==1.5.6 garmin-connect-personal-api-python
+      - name: Validate Python syntax
+        run: python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_export.py src/motherduck_maintain.py
+      - name: Run unit tests
+        run: python -m unittest discover -s checks -p '*_checks.py' -v
