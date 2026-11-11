@@ -138,7 +138,8 @@ def _json(value: Any) -> str:
 
 def _bulk_insert(con: duckdb.DuckDBPyConnection, table: str, rows: list[tuple],
                  value_template: str, conflict_clause: str = "",
-                 chunk_size: int = 500) -> None:
+                 chunk_size: int = 500,
+                 columns: tuple[str, ...] | None = None) -> None:
     """Send bounded multi-row INSERT statements instead of one network round-trip per row."""
     if not rows:
         return
@@ -147,8 +148,9 @@ def _bulk_insert(con: duckdb.DuckDBPyConnection, table: str, rows: list[tuple],
         batch = rows[offset:offset + chunk_size]
         values_sql = ", ".join([tuple_sql] * len(batch))
         params = [value for row in batch for value in row]
+        column_sql = f" ({', '.join(columns)})" if columns else ""
         con.execute(
-            f"INSERT INTO {table} VALUES {values_sql} {conflict_clause}",
+            f"INSERT INTO {table}{column_sql} VALUES {values_sql} {conflict_clause}",
             params,
         )
 
@@ -173,17 +175,8 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
                 source_run_id=excluded.source_run_id, loaded_at=excluded.loaded_at""")
 
         if source_name == "activities":
-            # Collapse legacy hash-keyed copies to the Garmin activityId key.
-            # CORE is naturally unique by activity_id.
-            con.execute("""
-                DELETE FROM raw.garmin_payloads
-                WHERE source_name = 'activities'
-                  AND record_key <> coalesce(
-                      json_extract_string(payload, '$.summary.activityId'),
-                      json_extract_string(payload, '$.activityId'),
-                      record_key
-                  )
-            """)
+            # Keep historical RAW payloads intact. CORE is naturally unique
+            # by Garmin activityId and remains the canonical activity table.
             core_rows = []
             for index, record in enumerate(rows):
                 s = _summary(record)
@@ -247,7 +240,15 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
                     device_id=coalesce(excluded.device_id, core.activities.device_id),
                     gear_id=coalesce(excluded.gear_id, core.activities.gear_id),
                     source_payload=excluded.source_payload, source_run_id=excluded.source_run_id,
-                    loaded_at=excluded.loaded_at""")
+                    loaded_at=excluded.loaded_at""",
+                columns=(
+                    "activity_id", "activity_date", "activity_type", "activity_name",
+                    "distance_m", "duration_s", "elapsed_duration_s", "average_speed_m_s",
+                    "average_hr", "max_hr", "calories", "average_run_cadence",
+                    "max_run_cadence", "stride_length_mm", "aerobic_training_effect",
+                    "activity_training_load", "vo2_max", "device_id", "gear_id",
+                    "source_payload", "source_run_id", "loaded_at",
+                ))
             workout_rows = []
             for record in rows:
                 summary = _summary(record)

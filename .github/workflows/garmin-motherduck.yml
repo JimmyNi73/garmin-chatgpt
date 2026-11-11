@@ -3,11 +3,11 @@ name: Garmin to MotherDuck | Full History
 on:
   push:
     branches:
-      - feature/motherduck-service-db
+      - main
   workflow_dispatch:
     inputs:
       confirm_run:
-        description: "Type START to confirm the Garmin full-history load"
+        description: "Type START to confirm the final full-history Garmin load"
         required: true
         type: string
 
@@ -16,7 +16,7 @@ permissions:
 
 concurrency:
   group: garmin-motherduck-production
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   ingest:
@@ -39,9 +39,9 @@ jobs:
         run: python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_export.py
 
       - name: Validate ingestion logic
-        run: python -m unittest discover -s tests -v
+        run: python -m unittest discover -s checks -p '*_checks.py' -v
 
-      - name: Ingest complete Garmin history into MotherDuck
+      - name: Load complete Garmin history into MotherDuck
         env:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}

@@ -15,16 +15,13 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from garmin_export import (
-    GarminCLI, activity_records, date_index, device_registry,
+    GarminCLI, activity_records, device_registry,
     fetch_activities, fetch_month_health, fetch_gear_data, enrich_gear_records,
 )
 from motherduck_loader import connect, ensure_schema, load_records
 
 LOG = logging.getLogger("motherduck_export")
 TZ = ZoneInfo("Europe/Stockholm")
-HISTORIC_MONTHS = ("2011-08", "2022-10")
-
-
 def month_bounds(month: str) -> tuple[date, date]:
     first = date.fromisoformat(month + "-01")
     if first.month == 12:
@@ -142,9 +139,12 @@ def main() -> None:
                         format="%(asctime)s %(levelname)s %(message)s")
     if not os.getenv("GARMIN_PERSONAL_API_KEY") or not os.getenv("MOTHERDUCK_TOKEN"):
         raise RuntimeError("GARMIN_PERSONAL_API_KEY and MOTHERDUCK_TOKEN are required")
+    history_mode = os.getenv("GARMIN_HISTORY_MODE", "full").strip().lower()
+    if history_mode != "full":
+        raise RuntimeError("GARMIN_HISTORY_MODE must be 'full'; partial ingestion is not supported")
+    LOG.info("Configured ingestion mode: %s", history_mode)
 
     today = datetime.now(TZ).date()
-    recent_start = today - timedelta(days=13)
     run_id = str(uuid.uuid4())
     cli = GarminCLI()
     datasets: dict[str, list[dict]] = {}

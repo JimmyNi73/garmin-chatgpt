@@ -30,6 +30,56 @@ class LoaderTests(unittest.TestCase):
             stable_record_key("daily", row, 0),
         )
 
+
+    def test_activity_load_handles_existing_schema_column_order(self):
+        con = duckdb.connect(":memory:")
+        self.addCleanup(con.close)
+        con.execute("CREATE SCHEMA raw")
+        con.execute("CREATE SCHEMA core")
+        con.execute("CREATE SCHEMA mart")
+        con.execute("""
+            CREATE TABLE core.activities (
+                activity_id VARCHAR PRIMARY KEY, activity_date DATE, activity_type VARCHAR,
+                activity_name VARCHAR, distance_m DOUBLE, duration_s DOUBLE,
+                elapsed_duration_s DOUBLE, average_speed_m_s DOUBLE,
+                average_hr DOUBLE, max_hr DOUBLE, calories DOUBLE,
+                average_run_cadence DOUBLE, max_run_cadence DOUBLE, vo2_max DOUBLE,
+                device_id VARCHAR, gear_id VARCHAR, source_payload JSON NOT NULL,
+                source_run_id VARCHAR NOT NULL, loaded_at TIMESTAMPTZ NOT NULL
+            )
+        """)
+        ensure_schema(con)
+
+        activity = {
+            "summary": {
+                "activityId": "legacy-order-1",
+                "startTimeLocal": "2024-01-03 07:00:00",
+                "activityType": {"typeKey": "running"},
+                "distance": 5000,
+                "duration": 1500,
+                "averageHR": 142,
+                "averageRunCadence": 170,
+                "maxRunCadence": 180,
+                "vO2MaxValue": 49.5,
+                "deviceId": "device-1",
+            },
+            "detail": {
+                "summaryDTO": {
+                    "avgStrideLength": 1120,
+                    "aerobicTrainingEffect": 3.4,
+                    "activityTrainingLoad": 68,
+                }
+            },
+            "gear": {"gear_id": "gear-1"},
+        }
+        self.assertEqual(load_records(con, "activities", [activity], "schema-run"), 1)
+        actual = con.execute("""
+            SELECT vo2_max, device_id, gear_id, stride_length_mm,
+                   aerobic_training_effect, activity_training_load
+            FROM core.activities WHERE activity_id = 'legacy-order-1'
+        """).fetchone()
+        self.assertEqual(actual, (49.5, "device-1", "gear-1", 1120.0, 3.4, 68.0))
+
     def test_bulk_activity_and_metric_loads(self):
         con = duckdb.connect(":memory:")
         self.addCleanup(con.close)

@@ -1,11 +1,18 @@
 name: Validate Garmin exporter
 
 on:
+  push:
+    branches: [release/garmin-production-clean]
   pull_request:
     branches: [main]
     paths:
       - "src/garmin_export.py"
+      - "src/motherduck_loader.py"
+      - "src/motherduck_export.py"
+      - "sql/garmin_motherduck_model.sql"
+      - "checks/**"
       - ".github/workflows/validate-garmin-export.yml"
+      - ".github/workflows/garmin-motherduck.yml"
 
 permissions:
   contents: read
@@ -19,4 +26,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Validate Python syntax
-        run: python -m py_compile src/garmin_export.py
+        run: python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_export.py
+      - name: Run exporter quality checks
+        run: python -m unittest discover -s checks -p '*_checks.py' -v
