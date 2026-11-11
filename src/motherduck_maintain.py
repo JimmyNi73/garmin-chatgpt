@@ -106,19 +106,40 @@ def _group_health(rows: list[dict]) -> dict[str, list[dict]]:
     return result
 
 
-def _existing_keys(con, source: str, keys: list[str]) -> set[str]:
+def _existing_keys(con, source: str, rows: list[dict], keys: list[str]) -> set[str]:
     found: set[str] = set()
     for offset in range(0, len(keys), 400):
         batch = keys[offset:offset + 400]
         if not batch:
             continue
         placeholders = ",".join("?" for _ in batch)
-        rows = con.execute(
+        matches = con.execute(
             f"SELECT record_key FROM raw.garmin_payloads "
             f"WHERE source_name = ? AND record_key IN ({placeholders})",
             [source, *batch],
         ).fetchall()
-        found.update(row[0] for row in rows)
+        found.update(row[0] for row in matches)
+
+    # Existing rows may still carry legacy content-hash keys. For date-grain
+    # sources, count a matching source/date as an upsert, not as a new row.
+    daily_sources = {
+        "daily_summaries", "stress", "steps", "sleep_summaries",
+        "body_battery", "hrv_summaries", "wellness_activity_summaries",
+        "sleep", "heart_rate", "hrv", "spo2", "fitness_age",
+    }
+    if source in daily_sources:
+        days = sorted({str(row.get("calendarDate", row.get("date", row.get("measurementDate", "")))[:10])
+                       for row in rows if row.get("calendarDate", row.get("date", row.get("measurementDate")))})
+        for offset in range(0, len(days), 300):
+            batch_days = days[offset:offset + 300]
+            day_placeholders = ",".join("TRY_CAST(? AS DATE)" for _ in batch_days)
+            matches = con.execute(
+                f"SELECT DISTINCT CAST(event_date AS VARCHAR) FROM raw.garmin_payloads "
+                f"WHERE source_name = ? AND event_date IN ({day_placeholders})",
+                [source, *batch_days],
+            ).fetchall()
+            present_days = {row[0] for row in matches}
+            found.update(day for day in present_days)
     return found
 
 
@@ -135,7 +156,7 @@ def _dry_run_report(con, activities: list[dict], health_by_source: dict[str, lis
     LOG.info("DRY RUN — no MotherDuck writes will be performed")
     for source, rows in sorted(groups.items()):
         keys = [stable_record_key(source, row, i) for i, row in enumerate(rows)]
-        existing = _existing_keys(con, source, keys)
+        existing = _existing_keys(con, source, rows, keys)
         new_count = sum(1 for key in keys if key not in existing)
         existing_count = len(keys) - new_count
         total_new += new_count
