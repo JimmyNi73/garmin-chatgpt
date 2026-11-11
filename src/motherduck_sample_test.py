@@ -116,7 +116,7 @@ def main():
         try:
             for table in ("raw.garmin_payloads", "core.activities", "core.activity_workouts",
                           "core.daily_metrics", "core.devices", "core.gear"):
-                con.execute(f"DELETE FROM {table}")
+                con.execute(f"TRUNCATE TABLE {table}")
             con.execute("COMMIT")
         except Exception:
             con.execute("ROLLBACK")
