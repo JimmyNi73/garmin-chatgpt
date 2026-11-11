@@ -54,3 +54,5 @@ jobs:
           GARMIN_TEST_MONTH_2022: "2022-05"
           MOTHERDUCK_BATCH_SIZE: "100"
         run: python src/motherduck_export.py
+
+# [run-garmin-test] Re-run after excluding empty health placeholders from CORE.
