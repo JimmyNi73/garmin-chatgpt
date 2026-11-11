@@ -33,13 +33,35 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: python -m pip install --upgrade garmin-connect-personal-api-python duckdb==1.5.6
+        run: python -m pip install --upgrade garmin-connect-personal-api-python duckdb==1.5.6 dropbox
 
       - name: Validate Python syntax
         run: python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_export.py
 
       - name: Validate ingestion logic
         run: python -m unittest discover -s checks -p '*_checks.py' -v
+
+      - name: Download the reference Garmin ZIP from Dropbox
+        env:
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          import dropbox
+          dbx = dropbox.Dropbox(
+              oauth2_refresh_token=os.environ["DROPBOX_REFRESH_TOKEN"],
+              app_key=os.environ["DROPBOX_APP_KEY"],
+              app_secret=os.environ["DROPBOX_APP_SECRET"],
+              timeout=180,
+          )
+          _, response = dbx.files_download("/Test/Garmin_Connect_Export_2026-11-06.zip")
+          with open("Garmin_Connect_Export_2026-11-06.zip", "wb") as target:
+              target.write(response.content)
+          response.close()
+          print("Downloaded Garmin reference ZIP")
+          PY
 
       - name: Truncate and load three test windows into MotherDuck
         env:
@@ -53,6 +75,8 @@ jobs:
           GARMIN_TEST_MONTH_2011: "2011-12"
           GARMIN_TEST_MONTH_2022: "2022-05"
           MOTHERDUCK_BATCH_SIZE: "100"
-        run: python src/motherduck_export.py
+        run: |
+          python src/motherduck_export.py
+          GARMIN_VALIDATION_ZIP="Garmin_Connect_Export_2026-11-06.zip" python src/garmin_zip_import.py
 
 # [run-garmin-test] Latest test supersedes stale queued runs; validate all data fixes.
