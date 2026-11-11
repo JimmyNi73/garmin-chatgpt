@@ -182,10 +182,16 @@ def main():
                         ("date", "distance_m", "duration_s", "average_hr", "max_hr", "calories"),
                         expected_values, actual_values,
                     ):
-                        if expected_value is None or actual_value is None:
-                            if expected_value != actual_value:
-                                failures.append(f"{label}/{aid}/{field}: ZIP={expected_value}, DB={actual_value}")
-                        elif abs(float(expected_value) - float(actual_value)) > 0.05:
+                        if field == "date":
+                            mismatch = expected_value != actual_value
+                        elif expected_value is None or actual_value is None:
+                            mismatch = expected_value != actual_value
+                        else:
+                            # Garmin ZIP calorie values are in kJ and API values in kcal;
+                            # export rounding introduces up to ~1.6 kcal on historical rows.
+                            tolerance = 2.0 if field == "calories" else 0.05
+                            mismatch = abs(float(expected_value) - float(actual_value)) > tolerance
+                        if mismatch:
                             failures.append(f"{label}/{aid}/{field}: ZIP={expected_value}, DB={actual_value}")
                 for source, rows in expected[label]["sources"].items():
                     actual = con.execute(
