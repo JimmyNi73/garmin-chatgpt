@@ -148,7 +148,7 @@ def load_in_batches(con, source: str, rows: list[dict], run_id: str,
     return loaded
 
 
-def main() -> None:
+def main_full() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(message)s")
     if not os.getenv("GARMIN_PERSONAL_API_KEY") or not os.getenv("MOTHERDUCK_TOKEN"):
@@ -326,5 +326,209 @@ def main() -> None:
         con.close()
 
 
+
+def activity_day(summary: dict) -> date:
+    """Parse Garmin activity timestamps returned as ISO strings or epoch milliseconds."""
+    raw = summary.get("startTimeLocal") or summary.get("startTimeGMT")
+    if raw is None:
+        raise RuntimeError(f"Activity {summary.get('activityId')} has no date")
+    try:
+        if isinstance(raw, (int, float)) or str(raw).isdigit():
+            stamp = float(raw)
+            if stamp > 10**11:
+                stamp /= 1000
+            return datetime.fromtimestamp(stamp, TZ).date()
+        return date.fromisoformat(str(raw)[:10])
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise RuntimeError(f"Unparseable activity date for {summary.get('activityId')}: {raw}") from exc
+
+
+def truncate_source_tables(con) -> None:
+    """Clear every physical ingestion table; views are derived and must not be truncated."""
+    tables = (
+        "raw.garmin_payloads",
+        "core.activities",
+        "core.activity_workouts",
+        "core.daily_metrics",
+        "core.devices",
+        "core.gear",
+    )
+    for table in tables:
+        LOG.warning("TRUNCATING %s", table)
+        con.execute(f"TRUNCATE TABLE {table}")
+
+
+def main_test() -> None:
+    """Destructive, bounded test load: one month in 2011, one in 2022, latest 14 days."""
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
+                        format="%(asctime)s %(levelname)s %(message)s")
+    if not os.getenv("GARMIN_PERSONAL_API_KEY") or not os.getenv("MOTHERDUCK_TOKEN"):
+        raise RuntimeError("GARMIN_PERSONAL_API_KEY and MOTHERDUCK_TOKEN are required")
+    batch_size = int(os.getenv("MOTHERDUCK_BATCH_SIZE", "100"))
+    if batch_size < 1:
+        raise ValueError("MOTHERDUCK_BATCH_SIZE must be at least 1")
+
+    today = datetime.now(TZ).date()
+    month_2011 = os.getenv("GARMIN_TEST_MONTH_2011", "2011-12")
+    month_2022 = os.getenv("GARMIN_TEST_MONTH_2022", "2022-05")
+    start_2011, end_2011 = month_bounds(month_2011)
+    start_2022, end_2022 = month_bounds(month_2022)
+    recent_start, recent_end = today - timedelta(days=13), today
+    windows = [
+        (f"month_{month_2011}", start_2011, end_2011),
+        (f"month_{month_2022}", start_2022, end_2022),
+        ("latest_14_days", recent_start, recent_end),
+    ]
+    LOG.info("TEST windows: %s", [(n, s.isoformat(), e.isoformat()) for n, s, e in windows])
+
+    cli = GarminCLI()
+    run_id = str(uuid.uuid4())
+
+    # Retrieve and preflight every source window BEFORE truncating anything.
+    summaries_by_id: dict[str, dict] = {}
+    for label, start, end in windows:
+        LOG.info("Fetching activity index for %s (%s..%s)", label, start, end)
+        summaries = fetch_activities(cli, start.isoformat(), end.isoformat())
+        matching = [s for s in summaries if start <= activity_day(s) <= end]
+        if label != "latest_14_days" and not matching:
+            raise RuntimeError(f"No Garmin activities found in required test window {label}")
+        for summary in matching:
+            aid = summary.get("activityId", summary.get("activity_id", summary.get("id")))
+            if aid is None:
+                raise RuntimeError(f"Garmin activity index {label}: missing activityId")
+            summaries_by_id[str(aid)] = summary
+        LOG.info("Activity summaries for %s: %d", label, len(matching))
+
+    if not summaries_by_id:
+        raise RuntimeError("Garmin returned no activities in any test window")
+
+    # Gear is optional metadata, matching the production ingestion behavior.
+    try:
+        gear_registry, activity_to_gear = fetch_gear_data(cli)
+    except Exception as exc:
+        LOG.warning("Gear registry unavailable (%s); continuing without gear metadata", exc)
+        gear_registry, activity_to_gear = {}, {}
+
+    # Fetch all three health windows before the destructive truncate.
+    health_groups: dict[str, list[dict]] = {}
+    weight_rows = 0
+    health_months = sorted({month_2011, month_2022, today.strftime("%Y-%m")})
+    for month in health_months:
+        health = fetch_month_health(cli, month, today=today)
+        if health.get("metadata", {}).get("export_status") != "complete":
+            raise RuntimeError(
+                f"Health source errors for {month}: {health.get('source_errors', [])}")
+        month_start, month_end = month_bounds(month)
+        if month == today.strftime("%Y-%m"):
+            allowed_start, allowed_end = recent_start, recent_end
+        elif month == month_2011:
+            allowed_start, allowed_end = start_2011, end_2011
+        else:
+            allowed_start, allowed_end = start_2022, end_2022
+        for row in health_records("health", health, allowed_start, allowed_end):
+            source = row.pop("metric_source")
+            health_groups.setdefault(source, []).append(row)
+
+    # Activity detail calls are bounded and validated against the exact summary IDs.
+    summaries = list(summaries_by_id.values())
+    activity_batches: list[list[dict]] = []
+    for offset in range(0, len(summaries), batch_size):
+        summary_batch = summaries[offset:offset + batch_size]
+        activities = activity_records(cli, summary_batch)
+        expected_ids = {
+            str(row.get("activityId", row.get("activity_id", row.get("id"))))
+            for row in summary_batch
+        }
+        detail_ids = [
+            str(row.get("summary", {}).get("activityId"))
+            for row in activities
+        ]
+        if (len(detail_ids) != len(expected_ids)
+                or len(detail_ids) != len(set(detail_ids))
+                or set(detail_ids) != expected_ids):
+            raise RuntimeError(
+                f"Activity detail batch preflight failed at offset {offset}; nothing truncated")
+        enrich_gear_records(activities, gear_registry, activity_to_gear)
+        activity_batches.append(activities)
+
+    # All Garmin retrieval and activity preflight succeeded. Only now clear tables.
+    con = connect()
+    total_loaded = 0
+    activity_count = 0
+    mapped_activities = 0
+    try:
+        ensure_schema(con)
+        truncate_source_tables(con)
+
+        for source, rows in health_groups.items():
+            unique = {
+                json.dumps(row, sort_keys=True, ensure_ascii=False, default=str): row
+                for row in rows
+            }
+            batch_rows = list(unique.values())
+            total_loaded += load_in_batches(con, source, batch_rows, run_id, batch_size)
+            if source == "weight_measurements":
+                weight_rows += len(batch_rows)
+
+        for activities in activity_batches:
+            total_loaded += load_in_batches(
+                con, "activities", activities, run_id, batch_size)
+            device_rows = device_registry(activities)
+            if device_rows:
+                total_loaded += load_in_batches(
+                    con, "devices", device_rows, run_id, batch_size)
+            activity_count += len(activities)
+            mapped_activities += sum(
+                1 for row in activities
+                if isinstance(row.get("gear"), dict)
+                and row["gear"].get("gear_id") is not None)
+
+        gear_rows = [
+            {"gear_id": gear_id, **gear}
+            for gear_id, gear in sorted(gear_registry.items())
+        ]
+        if gear_rows:
+            total_loaded += load_in_batches(
+                con, "gear_registry", gear_rows, run_id, batch_size)
+
+        vo2 = []
+        for summary in summaries:
+            value = summary.get("vO2MaxValue")
+            if value is not None:
+                vo2.append({
+                    "calendarDate": activity_day(summary).isoformat(),
+                    "activityId": str(summary.get("activityId")),
+                    "vo2MaxValue": value,
+                    "source_payload": summary,
+                })
+        if vo2:
+            total_loaded += load_in_batches(con, "vo2_max", vo2, run_id, batch_size)
+
+        model_path = Path(__file__).resolve().parents[1] / "sql" / "garmin_motherduck_model.sql"
+        con.execute(model_path.read_text(encoding="utf-8"))
+        counts = con.execute("""
+            SELECT source_name, count(*) FROM raw.garmin_payloads
+            GROUP BY source_name ORDER BY source_name
+        """).fetchall()
+        LOG.info(
+            "TEST ingestion succeeded: run=%s activities=%d gear_mapped=%d "
+            "weight_rows=%d loaded=%d requests=%d source_counts=%s",
+            run_id, activity_count, mapped_activities, weight_rows,
+            total_loaded, cli.request_count, counts)
+    finally:
+        con.close()
+
+
+def main() -> None:
+    mode = os.getenv("GARMIN_HISTORY_MODE", "full").strip().lower()
+    if mode == "test":
+        main_test()
+    elif mode == "full":
+        main_full()
+    else:
+        raise RuntimeError("GARMIN_HISTORY_MODE must be 'full' or 'test'")
+
+
 if __name__ == "__main__":
     main()
+
