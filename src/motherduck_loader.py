@@ -11,6 +11,13 @@ from typing import Any, Iterable
 import duckdb
 
 
+DAILY_GRAIN_SOURCES = {
+    "daily_summaries", "stress", "steps", "sleep_summaries",
+    "body_battery", "hrv_summaries", "wellness_activity_summaries",
+    "sleep", "heart_rate", "hrv", "spo2", "fitness_age",
+}
+
+
 def _summary(record: dict[str, Any]) -> dict[str, Any]:
     value = record.get("summary")
     return value if isinstance(value, dict) else record
@@ -38,7 +45,7 @@ def stable_record_key(source_name: str, record: dict[str, Any], index: int) -> s
     # once per day and each sample must remain a separate observation.
     day = _first(record.get("calendarDate"), record.get("date"),
                  record.get("measurementDate"))
-    if day is not None and source_name != "weight_measurements":
+    if day is not None and source_name in DAILY_GRAIN_SOURCES:
         return str(day)[:10]
     canonical = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(f"{source_name}:{canonical}".encode()).hexdigest()
@@ -307,6 +314,24 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
                 value = record.get("source_payload", record)
                 metric_rows.append((source_name, key, event_date(record), _json(value),
                                     _json(record), source_run_id, loaded_at))
+            # Migrate legacy hash-keyed rows at the same daily grain before
+            # inserting the new date-keyed snapshot. This keeps the rolling
+            # refresh idempotent without leaving old RAW/CORE duplicates behind.
+            if source_name in DAILY_GRAIN_SOURCES:
+                days = sorted({event_date(record) for record in rows if event_date(record)})
+                for offset in range(0, len(days), 300):
+                    batch_days = days[offset:offset + 300]
+                    placeholders = ",".join("TRY_CAST(? AS DATE)" for _ in batch_days)
+                    con.execute(
+                        f"DELETE FROM raw.garmin_payloads WHERE source_name = ? "
+                        f"AND event_date IN ({placeholders}) AND record_key <> CAST(event_date AS VARCHAR)",
+                        [source_name, *batch_days],
+                    )
+                    con.execute(
+                        f"DELETE FROM core.daily_metrics WHERE metric_source = ? "
+                        f"AND metric_date IN ({placeholders}) AND record_key <> CAST(metric_date AS VARCHAR)",
+                        [source_name, *batch_days],
+                    )
             _bulk_insert(con, "core.daily_metrics", metric_rows,
                 "?, ?, TRY_CAST(? AS DATE), ?::JSON, ?::JSON, ?, ?",
                 """ON CONFLICT (metric_source, record_key) DO UPDATE SET
