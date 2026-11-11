@@ -149,7 +149,7 @@ def main():
             # Validate the two requested historical months against ZIP activity IDs
             # and the ZIP wellness records now represented in CORE.
             failures = []
-            for label, start, end in windows[:2]:
+            for label, start, end in windows:
                 exp_rows = expected[label]["activities"]
                 exp_ids = set(exp_rows)
                 db_ids = {
@@ -199,6 +199,40 @@ def main():
                         [source, start, end]).fetchone()[0]
                     if actual < len(rows):
                         failures.append(f"{label}/{source}: expected at least {len(rows)} rows, found {actual}")
+
+                # Curated views must not multiply the same ZIP sample because it
+                # also arrived through the Personal API.
+                expected_sleep_days = len({
+                    row["calendarDate"] for row in expected[label]["sources"].get("zip_sleep", [])
+                })
+                if expected_sleep_days:
+                    actual_sleep_days = con.execute(
+                        "SELECT count(*) FROM core.sleep WHERE sleep_date BETWEEN ? AND ?",
+                        [start, end]).fetchone()[0]
+                    if actual_sleep_days != expected_sleep_days:
+                        failures.append(
+                            f"{label}/core.sleep: expected {expected_sleep_days} canonical days, "
+                            f"found {actual_sleep_days}")
+
+                expected_weights = len(expected[label]["sources"].get("weight_measurements", []))
+                if expected_weights:
+                    actual_weights = con.execute(
+                        "SELECT count(*) FROM core.weight WHERE measurement_date BETWEEN ? AND ?",
+                        [start, end]).fetchone()[0]
+                    if actual_weights != expected_weights:
+                        failures.append(
+                            f"{label}/core.weight: expected {expected_weights} samples, "
+                            f"found {actual_weights}")
+
+                expected_vo2 = len(expected[label]["sources"].get("vo2_max", []))
+                if expected_vo2:
+                    actual_vo2 = con.execute(
+                        "SELECT count(*) FROM core.vo2_max WHERE measurement_date BETWEEN ? AND ?",
+                        [start, end]).fetchone()[0]
+                    if actual_vo2 != expected_vo2:
+                        failures.append(
+                            f"{label}/core.vo2_max: expected {expected_vo2} samples, found {actual_vo2}")
+
                 LOG.info("%s ZIP activities=%d DB activities=%d source_counts=%s",
                          label, len(exp_ids), len(db_ids),
                          {k: len(v) for k, v in expected[label]["sources"].items()})
