@@ -75,7 +75,7 @@ def main():
         cursor = start.replace(day=1)
         while cursor <= end:
             month = cursor.strftime("%Y-%m")
-            month_windows.setdefault(month, []).append((max(start, cursor), min(end, date(cursor.year, cursor.month, 1) + timedelta(days=31) - timedelta(days=1))))
+            next_month = date(cursor.year + (cursor.month == 12), cursor.month % 12 + 1, 1)\n            month_end = next_month - timedelta(days=1)\n            month_windows.setdefault(month, []).append((max(start, cursor), min(end, month_end)))
             cursor = (date(cursor.year + (cursor.month == 12), cursor.month % 12 + 1, 1))
     for month in sorted(month_windows):
         health = fetch_month_health(cli, month, today=today, full_month=True)
@@ -162,6 +162,43 @@ def main():
                 "SELECT source_payload FROM core.daily_metrics WHERE metric_source=?", [source]).fetchall()}
             if expected != raw or expected != core:
                 raise RuntimeError(f"Full health payload validation failed for {source}: expected={len(expected)} raw={len(raw)} core={len(core)}")
+
+        # Validate every workout, device, gear and global metadata payload too.
+        expected_workouts = {
+            (str(x["summary"].get("activityId", x["summary"].get("activity_id", x["summary"].get("id")))),
+             index, canonical(workout))
+            for x in activity_rows for index, workout in enumerate(x.get("workouts") or [])
+        }
+        actual_workouts = {
+            (str(aid), int(idx), canonical(json.loads(payload)))
+            for aid, idx, payload in con.execute(
+                "SELECT activity_id, workout_index, workout_payload FROM core.activity_workouts").fetchall()
+        }
+        if expected_workouts != actual_workouts:
+            raise RuntimeError(f"Workout validation failed: expected={len(expected_workouts)} actual={len(actual_workouts)}")
+
+        expected_devices = {str(x["device_id"]): canonical(x) for x in devices}
+        actual_devices = {str(aid): canonical(json.loads(payload)) for aid, payload in
+                          con.execute("SELECT device_id, source_payload FROM core.devices").fetchall()}
+        if expected_devices != actual_devices:
+            raise RuntimeError("Device registry validation failed")
+        expected_gear = {str(x["gear_id"]): canonical(x) for x in gear_rows}
+        actual_gear = {str(aid): canonical(json.loads(payload)) for aid, payload in
+                       con.execute("SELECT gear_id, source_payload FROM core.gear").fetchall()}
+        if expected_gear != actual_gear:
+            raise RuntimeError("Gear registry validation failed")
+        for source, rows in global_rows.items():
+            expected = {canonical(x) for x in rows}
+            actual = {canonical(json.loads(x[0])) for x in con.execute(
+                "SELECT payload FROM raw.garmin_payloads WHERE source_name=?", [source]).fetchall()}
+            if expected != actual:
+                raise RuntimeError(f"Global Garmin source validation failed: {source}")
+        if vo2:
+            expected_vo2 = {canonical(x) for x in vo2}
+            actual_vo2 = {canonical(json.loads(x[0])) for x in con.execute(
+                "SELECT payload FROM raw.garmin_payloads WHERE source_name='vo2_max'").fetchall()}
+            if expected_vo2 != actual_vo2:
+                raise RuntimeError("VO2 source payload validation failed")
 
         counts = con.execute("""
             SELECT 'raw.garmin_payloads', count(*) FROM raw.garmin_payloads
