@@ -134,6 +134,20 @@ def health_records(source: str, health: dict, allowed_start: date,
     return out
 
 
+def load_in_batches(con, source: str, rows: list[dict], run_id: str,
+                    batch_size: int) -> int:
+    """Commit bounded, independently retryable batches to MotherDuck."""
+    total = len(rows)
+    loaded = 0
+    for offset in range(0, total, batch_size):
+        batch = rows[offset:offset + batch_size]
+        count = load_records(con, source, batch, run_id)
+        loaded += count
+        LOG.info("MotherDuck batch: source=%s rows=%d/%d batch=%d",
+                 source, loaded, total, (offset // batch_size) + 1)
+    return loaded
+
+
 def main() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -142,26 +156,28 @@ def main() -> None:
     history_mode = os.getenv("GARMIN_HISTORY_MODE", "full").strip().lower()
     if history_mode != "full":
         raise RuntimeError("GARMIN_HISTORY_MODE must be 'full'; partial ingestion is not supported")
-    LOG.info("Configured ingestion mode: %s", history_mode)
+    batch_size = int(os.getenv("MOTHERDUCK_BATCH_SIZE", "100"))
+    if batch_size < 1:
+        raise ValueError("MOTHERDUCK_BATCH_SIZE must be at least 1")
+    LOG.info("Configured ingestion mode: %s; MotherDuck batch size: %d",
+             history_mode, batch_size)
 
     today = datetime.now(TZ).date()
     run_id = str(uuid.uuid4())
     cli = GarminCLI()
-    datasets: dict[str, list[dict]] = {}
     summaries_by_id: dict[str, dict] = {}
 
-    # Full Garmin history: fetch the activity index year-by-year, then retrieve
-    # every activity detail and every available monthly health period. No Dropbox
-    # dependency and no date sampling.
+    # Fetch and validate the complete activity index before any writes.
     for year in range(2000, today.year + 1):
         year_start = date(year, 1, 1)
         year_end = min(date(year, 12, 31), today)
         LOG.info("Fetching Garmin activity index for %d (%s..%s)", year, year_start, year_end)
-        year_summaries = fetch_activities(cli, year_start.isoformat(), year_end.isoformat())
-        for summary in year_summaries:
+        for summary in fetch_activities(cli, year_start.isoformat(), year_end.isoformat()):
             aid = summary.get("activityId", summary.get("activity_id", summary.get("id")))
             if aid is None:
                 raise RuntimeError(f"Garmin activity index {year}: missing activityId")
+            if str(aid) in summaries_by_id:
+                raise RuntimeError(f"Garmin activity index contains duplicate activityId: {aid}")
             summaries_by_id[str(aid)] = summary
 
     if not summaries_by_id:
@@ -176,96 +192,136 @@ def main() -> None:
                 pass
     if not activity_dates:
         raise RuntimeError("Garmin activity index has no usable dates")
-    first_month = min(activity_dates).replace(day=1)
-    cursor = first_month
-    while cursor <= today:
-        month_start = cursor
-        next_month = (date(cursor.year + 1, 1, 1) if cursor.month == 12
-                      else date(cursor.year, cursor.month + 1, 1))
-        month_end = min(next_month - timedelta(days=1), today)
-        month = cursor.strftime("%Y-%m")
-        LOG.info("Fetching full-month Garmin health history %s (%s..%s)",
-                 month, month_start, month_end)
-        health = fetch_month_health(cli, month, today=today)
-        meta = health.get("metadata", {})
-        if meta.get("export_status") != "complete":
-            raise RuntimeError(f"Health source errors for {month}: {health.get('source_errors', [])}")
-        for row in health_records("health", health, month_start, month_end):
-            metric = row.pop("metric_source")
-            datasets.setdefault(metric, []).append(row)
-        cursor = next_month
 
-    summaries = list(summaries_by_id.values())
-    activities = activity_records(cli, summaries) if summaries else []
-    detail_ids = [str(row.get("summary", {}).get("activityId")) for row in activities]
-    expected_ids = set(summaries_by_id)
-    if len(detail_ids) != len(set(detail_ids)) or set(detail_ids) != expected_ids:
-        raise RuntimeError("Activity detail preflight failed; refusing all database writes")
-    # Gear is optional metadata: Garmin's gear endpoint may return 404 for this
-    # account/API version. Never discard valid activities because that endpoint is absent.
+    # Gear is optional metadata; fetch it before activity batches so every
+    # activity batch is enriched consistently.
     try:
         gear_registry, activity_to_gear = fetch_gear_data(cli)
     except Exception as exc:
         LOG.warning("Garmin gear registry unavailable (%s); continuing with direct activity gear IDs only", exc)
         gear_registry, activity_to_gear = {}, {}
-    enrich_gear_records(activities, gear_registry, activity_to_gear)
-    unknown_gear_ids = set(activity_to_gear.values()) - set(gear_registry)
-    if unknown_gear_ids:
-        LOG.warning("Garmin gear assignments reference IDs absent from registry: %s; retaining IDs without metadata",
-                    sorted(unknown_gear_ids))
 
-    datasets["activities"] = activities
-    datasets["devices"] = device_registry(activities)
-    datasets["gear_registry"] = [
-        {"gear_id": gear_id, **gear} for gear_id, gear in sorted(gear_registry.items())
-    ]
-
-    # VO2 is loaded only when present in documented activity summaries.
-    vo2 = []
-    for summary in summaries:
-        value = summary.get("vO2MaxValue")
-        stamp = summary.get("startTimeLocal") or summary.get("startTimeGMT")
-        if value is not None and stamp:
-            vo2.append({"calendarDate": str(stamp)[:10],
-                        "activityId": str(summary.get("activityId")),
-                        "vo2MaxValue": value, "source_payload": summary})
-    if vo2:
-        datasets["vo2_max"] = vo2
-    else:
-        LOG.warning("No VO2 values returned in documented activity summaries")
-
-    # De-duplicate exact health payloads while retaining distinct same-day samples.
-    for source, rows in list(datasets.items()):
-        unique = {}
-        for row in rows:
-            key = json.dumps(row, sort_keys=True, ensure_ascii=False, default=str)
-            unique[key] = row
-        datasets[source] = list(unique.values())
-
-    mapped_activities = sum(1 for row in activities if isinstance(row.get("gear"), dict)
-                            and row["gear"].get("gear_id") is not None)
-    weight_rows = len(datasets.get("weight_measurements", []))
-    if weight_rows == 0:
-        LOG.warning("Garmin returned no weight measurements in the selected windows; continuing without inventing or importing historical values")
-    LOG.info("FULL-HISTORY preflight passed: %d activities, %d with gear, %d Garmin gear items, "
-             "%d weight records, %d Garmin requests, sources=%s",
-             len(activities), mapped_activities, len(gear_registry), weight_rows,
-             cli.request_count, {name: len(rows) for name, rows in datasets.items()})
-
-    # No writes occur before all Garmin retrieval and activity completeness checks pass.
     con = connect()
+    total_loaded = 0
+    activity_count = 0
+    mapped_activities = 0
+    weight_rows = 0
     try:
         ensure_schema(con)
-        total = 0
-        for source, rows in datasets.items():
-            total += load_records(con, source, rows, run_id)
+
+        # Health is fetched and committed one month at a time. A failed later
+        # month does not discard earlier committed work; stable keys make reruns
+        # idempotent. Every month is validated before its records are written.
+        first_month = min(activity_dates).replace(day=1)
+        cursor = first_month
+        while cursor <= today:
+            month_start = cursor
+            next_month = (date(cursor.year + 1, 1, 1) if cursor.month == 12
+                          else date(cursor.year, cursor.month + 1, 1))
+            month_end = min(next_month - timedelta(days=1), today)
+            month = cursor.strftime("%Y-%m")
+            LOG.info("Fetching full-month Garmin health history %s (%s..%s)",
+                     month, month_start, month_end)
+            health = fetch_month_health(cli, month, today=today)
+            if health.get("metadata", {}).get("export_status") != "complete":
+                raise RuntimeError(
+                    f"Health source errors for {month}: {health.get('source_errors', [])}")
+            by_source: dict[str, list[dict]] = {}
+            for row in health_records("health", health, month_start, month_end):
+                source = row.pop("metric_source")
+                by_source.setdefault(source, []).append(row)
+            for source, rows in by_source.items():
+                # Remove exact duplicates within this month without collapsing
+                # separate same-day samples (notably weigh-ins).
+                unique = {json.dumps(row, sort_keys=True, ensure_ascii=False, default=str): row
+                          for row in rows}
+                batch_rows = list(unique.values())
+                total_loaded += load_in_batches(
+                    con, source, batch_rows, run_id, batch_size)
+                if source == "weight_measurements":
+                    weight_rows += len(batch_rows)
+            LOG.info("Health month %s committed: %d source groups", month, len(by_source))
+            cursor = next_month
+
+        # Fetch activity details in bounded groups. Each group is checked against
+        # its matching summary IDs before it is committed.
+        summaries = list(summaries_by_id.values())
+        for offset in range(0, len(summaries), batch_size):
+            summary_batch = summaries[offset:offset + batch_size]
+            activities = activity_records(cli, summary_batch)
+            expected_ids = {
+                str(row.get("activityId", row.get("activity_id", row.get("id"))))
+                for row in summary_batch
+            }
+            detail_ids = [
+                str(row.get("summary", {}).get("activityId"))
+                for row in activities
+            ]
+            if (len(detail_ids) != len(expected_ids)
+                    or len(detail_ids) != len(set(detail_ids))
+                    or set(detail_ids) != expected_ids):
+                raise RuntimeError(
+                    f"Activity detail batch preflight failed at offset {offset}; "
+                    "batch not written")
+            enrich_gear_records(activities, gear_registry, activity_to_gear)
+            unknown_gear_ids = set(activity_to_gear.values()) - set(gear_registry)
+            if unknown_gear_ids and offset == 0:
+                LOG.warning("Gear assignments reference IDs absent from registry: %s",
+                            sorted(unknown_gear_ids))
+            total_loaded += load_in_batches(
+                con, "activities", activities, run_id, batch_size)
+            device_rows = device_registry(activities)
+            if device_rows:
+                total_loaded += load_in_batches(
+                    con, "devices", device_rows, run_id, batch_size)
+            activity_count += len(activities)
+            mapped_activities += sum(
+                1 for row in activities
+                if isinstance(row.get("gear"), dict)
+                and row["gear"].get("gear_id") is not None)
+            LOG.info("Activity detail progress: %d/%d activities committed",
+                     activity_count, len(summaries))
+
+        gear_rows = [
+            {"gear_id": gear_id, **gear}
+            for gear_id, gear in sorted(gear_registry.items())
+        ]
+        if gear_rows:
+            total_loaded += load_in_batches(
+                con, "gear_registry", gear_rows, run_id, batch_size)
+
+        # VO2 values are derived from the already validated activity index.
+        vo2 = []
+        for summary in summaries_by_id.values():
+            value = summary.get("vO2MaxValue")
+            stamp = summary.get("startTimeLocal") or summary.get("startTimeGMT")
+            if value is not None and stamp:
+                vo2.append({"calendarDate": str(stamp)[:10],
+                            "activityId": str(summary.get("activityId")),
+                            "vo2MaxValue": value, "source_payload": summary})
+        if vo2:
+            total_loaded += load_in_batches(
+                con, "vo2_max", vo2, run_id, batch_size)
+        else:
+            LOG.warning("No VO2 values returned in documented activity summaries")
+
+        if weight_rows == 0:
+            LOG.warning("Garmin returned no weight measurements in the selected windows")
+        LOG.info("FULL-HISTORY ingestion committed: %d activities, %d with gear, "
+                 "%d gear items, %d weight records, %d Garmin requests, run=%s",
+                 activity_count, mapped_activities, len(gear_registry), weight_rows,
+                 cli.request_count, run_id)
+
+        # Publish relational models only after all source retrieval and batch
+        # writes have completed successfully.
         model_path = Path(__file__).resolve().parents[1] / "sql" / "garmin_motherduck_model.sql"
         con.execute(model_path.read_text(encoding="utf-8"))
         counts = con.execute("""
             SELECT source_name, count(*) FROM raw.garmin_payloads
             GROUP BY source_name ORDER BY source_name
         """).fetchall()
-        LOG.info("Garmin full-history ingestion succeeded: run=%s loaded=%d counts=%s", run_id, total, counts)
+        LOG.info("Garmin full-history ingestion succeeded: run=%s loaded=%d counts=%s",
+                 run_id, total_loaded, counts)
     finally:
         con.close()
 
