@@ -25,12 +25,21 @@ def stable_record_key(source_name: str, record: dict[str, Any], index: int) -> s
     summary = _summary(record)
     candidates = [
         summary.get("activityId"), record.get("activityId"), record.get("activity_id"),
-        record.get("measurementId"), record.get("calendarDate") if source_name == "daily_summaries" else None,
-        record.get("id"),
+        record.get("measurementId"), record.get("id"),
     ]
     for value in candidates:
         if value is not None:
             return str(value)
+
+    # Garmin's date-indexed daily endpoints return at most one logical record
+    # per source/day. Use that grain as the upsert key so revised daily values
+    # replace the prior snapshot instead of accumulating hash-based duplicates.
+    # Weight measurements are explicitly excluded: users can weigh in more than
+    # once per day and each sample must remain a separate observation.
+    day = _first(record.get("calendarDate"), record.get("date"),
+                 record.get("measurementDate"))
+    if day is not None and source_name != "weight_measurements":
+        return str(day)[:10]
     canonical = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(f"{source_name}:{canonical}".encode()).hexdigest()
 
