@@ -57,8 +57,12 @@ def _row_date(row: dict) -> date | None:
 def _validate_activities(summaries: list[dict], details: list[dict],
                          start: date, end: date) -> None:
     ids = [_activity_id(row) for row in summaries]
-    if not ids or None in ids or len(ids) != len(set(ids)):
-        raise RuntimeError("Activity index is empty or contains missing/duplicate IDs")
+    if not ids:
+        if details:
+            raise RuntimeError("Garmin returned activity details without an activity index")
+        return
+    if None in ids or len(ids) != len(set(ids)):
+        raise RuntimeError("Activity index contains missing/duplicate IDs")
     for row in summaries:
         day = _row_date(row)
         if day is None or not (start <= day <= end):
