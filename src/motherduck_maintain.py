@@ -1,7 +1,7 @@
-"""Incremental Garmin -> MotherDuck maintenance (rolling 30-day overlap).
+"""Incremental Garmin -> MotherDuck maintenance (rolling 14-day overlap).
 
 This entrypoint is intentionally incapable of full-history ingestion. It fetches
-only the last 30 days, validates the complete payload before writing, and uses
+only the last 14 days, validates the complete payload before writing, and uses
 the idempotent loader to upsert existing natural keys.
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ from motherduck_loader import load_records, stable_record_key
 LOG = logging.getLogger("motherduck_maintain")
 TZ = ZoneInfo("Europe/Stockholm")
 DATABASE = "garmin_github"
-WINDOW_DAYS = 30
+WINDOW_DAYS = 14
 BATCH_SIZE = 100
 
 
