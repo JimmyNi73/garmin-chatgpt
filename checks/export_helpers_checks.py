@@ -133,6 +133,30 @@ class ExportHelperTests(unittest.TestCase):
             self.assertEqual(indexed["2026-11-07"]["value"], 22)
 
 
+    def test_hrv_summaries_are_clipped_to_requested_window(self):
+        health = {
+            "range_data": {
+                "hrv_summaries": {
+                    "raw": {
+                        "hrvSummaries": [
+                            {"calendarDate": "2026-10-13", "lastNightAvg": 61},
+                            {"calendarDate": "2026-10-29", "lastNightAvg": 62},
+                            {"calendarDate": "2026-11-11", "lastNightAvg": 63},
+                        ]
+                    },
+                    "by_date": {},
+                }
+            },
+            "by_date": {},
+        }
+        rows = me.health_records(
+            "health", health, ge.date(2026, 10, 29), ge.date(2026, 11, 11))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            [x["calendarDate"] for x in rows[0]["source_payload"]["hrvSummaries"]],
+            ["2026-10-29", "2026-11-11"],
+        )
+
     def test_optional_daily_treats_garmin_400_as_unavailable(self):
         class Http400CLI:
             def run(self, label, *args):
