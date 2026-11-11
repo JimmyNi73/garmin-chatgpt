@@ -218,3 +218,5 @@ def main():
 if __name__ == "__main__":
     main()
 
+
+# Controlled execution marker: [run-sample-garmin]
