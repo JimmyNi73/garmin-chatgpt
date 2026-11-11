@@ -55,4 +55,4 @@ jobs:
           MOTHERDUCK_BATCH_SIZE: "100"
         run: python src/motherduck_export.py
 
-# [run-garmin-test] Validate health filtering, fitness age and scalar-weight parsing.
+# [run-garmin-test] Validate health filtering, fitness age, weight parsing and HRV window clipping.
