@@ -121,5 +121,42 @@ class LoaderTests(unittest.TestCase):
         )
 
 
+
+    def test_daily_metric_key_uses_source_date(self):
+        first = {"calendarDate": "2026-11-10", "source_payload": {"steps": 5000}}
+        revised = {"calendarDate": "2026-11-10", "source_payload": {"steps": 6200}}
+        self.assertEqual(
+            stable_record_key("steps", first, 0),
+            stable_record_key("steps", revised, 1),
+        )
+
+    def test_weight_samples_on_same_date_remain_distinct(self):
+        first = {"calendarDate": "2026-11-10", "measurementId": "w-1",
+                 "source_payload": {"weightKg": 84.2}}
+        second = {"calendarDate": "2026-11-10", "measurementId": "w-2",
+                  "source_payload": {"weightKg": 84.0}}
+        self.assertNotEqual(
+            stable_record_key("weight_measurements", first, 0),
+            stable_record_key("weight_measurements", second, 1),
+        )
+
+    def test_daily_metric_rerun_updates_existing_day(self):
+        con = duckdb.connect(":memory:")
+        self.addCleanup(con.close)
+        ensure_schema(con)
+        first = {"calendarDate": "2026-11-10", "source_payload": {"steps": 5000}}
+        revised = {"calendarDate": "2026-11-10", "source_payload": {"steps": 6200}}
+        load_records(con, "steps", [first], "run-1")
+        load_records(con, "steps", [revised], "run-2")
+        self.assertEqual(
+            con.execute("SELECT count(*) FROM core.daily_metrics WHERE metric_source='steps'").fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            con.execute("SELECT json_extract_string(metric_value, '$.steps') FROM core.daily_metrics WHERE metric_source='steps'").fetchone()[0],
+            "6200",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
