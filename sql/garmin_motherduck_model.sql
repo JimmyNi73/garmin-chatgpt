@@ -113,11 +113,29 @@ WHERE weight_grams IS NOT NULL
    OR json_extract(metric_value, '$.weightKg') IS NOT NULL
    OR json_extract(metric_value, '$.weight.weightKg') IS NOT NULL;
 
+-- Expose one canonical sleep record per date. Prefer the dedicated daily
+-- summary, then the ZIP sleep export, then the legacy daily sleep endpoint.
+-- All source variants remain preserved in core.daily_metrics and RAW.
 CREATE OR REPLACE VIEW core.sleep AS
-SELECT record_key, metric_date AS sleep_date, metric_source AS sleep_source,
-       metric_value, source_payload
-FROM core.daily_metrics
-WHERE lower(metric_source) LIKE '%sleep%';
+WITH ranked AS (
+    SELECT record_key, metric_date AS sleep_date, metric_source AS sleep_source,
+           metric_value, source_payload,
+           row_number() OVER (
+               PARTITION BY metric_date
+               ORDER BY CASE
+                   WHEN metric_source = 'sleep_summaries' THEN 1
+                   WHEN metric_source = 'zip_sleep' THEN 2
+                   WHEN metric_source = 'sleep' THEN 3
+                   ELSE 4
+               END, loaded_at DESC, record_key
+           ) AS source_rank
+    FROM core.daily_metrics
+    WHERE lower(metric_source) LIKE '%sleep%'
+      AND metric_date IS NOT NULL
+)
+SELECT record_key, sleep_date, sleep_source, metric_value, source_payload
+FROM ranked
+WHERE source_rank = 1;
 
 -- HRV source rows are daily summaries. Extract the actual nightly/weekly values,
 -- status and Garmin baseline rather than forcing consumers to parse JSON.
