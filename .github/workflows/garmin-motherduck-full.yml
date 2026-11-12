@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   ingest:
-    if: ${{ contains(github.event.head_commit.message, '[run-garmin-full]') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[run-garmin-full]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
