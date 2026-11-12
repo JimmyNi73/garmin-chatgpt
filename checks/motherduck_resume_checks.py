@@ -7,6 +7,7 @@ import duckdb
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from motherduck_export import (  # noqa: E402
     ensure_progress_table,
+    health_records,
     initialize_full_rebuild,
     load_checkpointed_batches,
 )
@@ -97,6 +98,25 @@ class ResumeCheckpointTests(unittest.TestCase):
         self.assertEqual(self.con.execute(
             "SELECT count(*) FROM raw.garmin_payloads"
         ).fetchone()[0], 1)
+
+
+    def test_health_raw_keeps_range_envelope_and_indexed_rows(self):
+        from datetime import date
+        health = {
+            "range_data": {
+                "steps": {
+                    "raw": {"dailySummaries": [{"calendarDate": "2024-05-01", "steps": 7000}], "meta": "kept"},
+                    "by_date": {"2024-05-01": {"calendarDate": "2024-05-01", "steps": 7000}},
+                }
+            },
+            "by_date": {},
+        }
+        rows = health_records("health", health, date(2024, 5, 1), date(2024, 5, 31))
+        self.assertEqual(len(rows), 2)
+        envelope = next(row for row in rows if row.get("record_scope") == "range_response")
+        self.assertEqual(envelope["source_payload"]["meta"], "kept")
+        self.assertEqual(envelope["calendarDate"], None)
+        self.assertEqual(rows[0]["source_payload"]["steps"], 7000)
 
 if __name__ == "__main__":
     unittest.main()
