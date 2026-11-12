@@ -1,6 +1,7 @@
 name: Garmin to MotherDuck | Full History
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
