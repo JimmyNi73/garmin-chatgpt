@@ -62,4 +62,20 @@ jobs:
           GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
           GARMIN_BATCH_PAUSE_SECONDS: "5"
           GARMIN_MAX_RETRIES: "8"
-        run: python src/motherduck_export.py
+        run: |
+          for attempt in 1 2 3; do
+            echo "Full-history ingestion attempt $attempt of 3"
+            if python src/motherduck_export.py; then
+              echo "Garmin full-history ingestion completed successfully"
+              exit 0
+            else
+              exit_code=$?
+              echo "Attempt $attempt failed with exit code $exit_code"
+              if [ "$attempt" -lt 3 ]; then
+                echo "Waiting 60 seconds before retrying; durable checkpoints will be reused"
+                sleep 60
+              fi
+            fi
+          done
+          echo "Garmin full-history ingestion failed after 3 attempts"
+          exit 1
