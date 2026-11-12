@@ -1,2 +1,1 @@
-Trigger a full-history rebuild sourced directly from Garmin Personal API.
-Dropbox is not used as an ingestion source.
+Trigger full-history rebuild directly from Garmin Personal API after validation fixes.
