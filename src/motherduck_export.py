@@ -477,11 +477,13 @@ def main_full() -> None:
             if not table_name.replace("_", "").isalnum():
                 raise RuntimeError(f"Unexpected RAW source name: {source_name!r}")
             mismatch = con.execute(f"""
-                SELECT count(*) FROM raw.garmin_payloads g
+                SELECT count(*) FROM (
+                    SELECT record_key, payload FROM raw.garmin_payloads
+                    WHERE source_name = ?
+                ) g
                 FULL OUTER JOIN raw.{table_name} s ON s.record_key = g.record_key
-                WHERE (g.source_name = ? OR g.source_name IS NULL)
-                  AND (g.record_key IS NULL OR s.record_key IS NULL
-                       OR g.payload IS DISTINCT FROM s.payload)
+                WHERE g.record_key IS NULL OR s.record_key IS NULL
+                   OR g.payload IS DISTINCT FROM s.payload
             """, [source_name]).fetchone()[0]
             if mismatch:
                 raise RuntimeError(
