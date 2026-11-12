@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # Regular schedule: 06:07, 08:07, 14:07, 20:07 and 22:07 Stockholm time.
-    - cron: "7 6,8,14,20,22 * * *"
+    - cron: "0 6,8,14,20,22 * * *"
       timezone: "Europe/Stockholm"
 
 permissions:
