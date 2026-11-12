@@ -743,16 +743,21 @@ def optional_daily(cli: GarminCLI, unavailable: list[dict[str, str]],
 
 
 def fetch_month_health(cli: GarminCLI, month: str,
-                      today: date | None = None) -> dict[str, Any]:
+                      today: date | None = None,
+                      full_month: bool = False) -> dict[str, Any]:
     """Fetch health data for a month, never requesting dates later than today."""
     month_start, month_end = month_bounds(month)
     run_date = today or datetime.now(TZ).date()
     end_date = min(date.fromisoformat(month_end), run_date)
-    # Full-history ingestion must use identical calendar-month boundaries
-    # for historical and current data. The incremental exporter has its own
-    # rolling-window behavior; it must not define the historical backfill.
-    start_date = date.fromisoformat(month_start)
-    history_scope = "full_month_all_available_dates"
+    if month == run_date.strftime("%Y-%m") and not full_month:
+        # Incremental/current export retains its rolling 30-day window.
+        start_date = run_date - timedelta(days=29)
+        history_scope = "rolling_30_days"
+    else:
+        # Full-history rebuild uses the same complete calendar-month boundary
+        # for every month, including the current one.
+        start_date = date.fromisoformat(month_start)
+        history_scope = "full_month_all_available_dates"
     start = start_date.isoformat()
     end = end_date.isoformat()
     errors: list[dict[str, str]] = []
