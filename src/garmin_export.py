@@ -288,16 +288,22 @@ class GarminCLI:
                 except json.JSONDecodeError as exc:
                     raise RuntimeError(f"{label}: invalid JSON: {exc}") from exc
             wait = retry_after(result.stderr)
-            transient_network_error = bool(re.search(
-                r"SSL|UNEXPECTED_EOF|EOF occurred|connection (?:reset|aborted|error)|"
-                r"remote end closed|remote disconnected|max retries exceeded|"
-                r"temporarily unavailable|timed? out|name or service not known|"
-                r"HTTP\\s*5\\d\\d",
-                result.stderr or "", re.I,
-            ))
-            if wait is None and transient_network_error:
-                # Retry transient server-side failures with bounded backoff.
-                wait = min(120, 15 * (attempt + 1))
+            server_error = bool(re.search(r"HTTP\\s*5\\d\\d", result.stderr or "", re.I))
+            if server_error:
+                # The Garmin API occasionally returns transient 5xx/Cloudflare
+                # gateway errors. Give it three total attempts, 60 seconds apart.
+                if attempt >= 2:
+                    raise RuntimeError(f"{label} failed after 3 attempts: {result.stderr.strip()}")
+                wait = 60
+            else:
+                transient_network_error = bool(re.search(
+                    r"SSL|UNEXPECTED_EOF|EOF occurred|connection (?:reset|aborted|error)|"
+                    r"remote end closed|remote disconnected|max retries exceeded|"
+                    r"temporarily unavailable|timed? out|name or service not known",
+                    result.stderr or "", re.I,
+                ))
+                if wait is None and transient_network_error:
+                    wait = min(60, 5 * (attempt + 1))
             if wait is None or attempt >= MAX_RETRIES:
                 raise RuntimeError(f"{label} failed: {result.stderr.strip()}")
             wait += random.uniform(0, 2)
