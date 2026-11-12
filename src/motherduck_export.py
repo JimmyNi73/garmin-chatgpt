@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 from garmin_export import (
     GarminCLI, activity_records, device_registry,
-    fetch_activities, fetch_month_health, fetch_gear_data, enrich_gear_records,
+    fetch_activities, fetch_month_health, fetch_gear_data, enrich_gear_records, optional,
 )
 from motherduck_loader import connect, ensure_schema, load_records
 
