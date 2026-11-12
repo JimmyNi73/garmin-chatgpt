@@ -164,6 +164,40 @@ def load_in_batches(con, source: str, rows: list[dict], run_id: str,
     return loaded
 
 
+
+def ensure_progress_table(con) -> None:
+    """Durable checkpoints: completed health months and activity detail IDs."""
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS raw.garmin_ingestion_progress (
+            phase VARCHAR NOT NULL,
+            item_key VARCHAR NOT NULL,
+            completed_at TIMESTAMPTZ NOT NULL DEFAULT current_timestamp,
+            PRIMARY KEY (phase, item_key)
+        )
+    """)
+
+
+def completed_items(con, phase: str) -> set[str]:
+    return {
+        str(row[0]) for row in con.execute(
+            "SELECT item_key FROM raw.garmin_ingestion_progress WHERE phase = ?",
+            [phase],
+        ).fetchall()
+    }
+
+
+def mark_completed(con, phase: str, item_keys: list[str]) -> None:
+    """Persist progress only after the corresponding data writes have committed."""
+    if not item_keys:
+        return
+    con.executemany("""
+        INSERT INTO raw.garmin_ingestion_progress (phase, item_key, completed_at)
+        VALUES (?, ?, current_timestamp)
+        ON CONFLICT (phase, item_key) DO UPDATE
+        SET completed_at = excluded.completed_at
+    """, [(phase, str(key)) for key in item_keys])
+
+
 def main_full() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -224,10 +258,12 @@ def main_full() -> None:
     weight_rows = 0
     try:
         ensure_schema(con)
+        ensure_progress_table(con)
 
         # Health is fetched and committed one month at a time. A failed later
         # month does not discard earlier committed work; stable keys make reruns
         # idempotent. Every month is validated before its records are written.
+        completed_health_months = completed_items(con, "health_month")
         first_month = min(activity_dates).replace(day=1)
         cursor = first_month
         while cursor <= today:
@@ -236,6 +272,10 @@ def main_full() -> None:
                           else date(cursor.year, cursor.month + 1, 1))
             month_end = min(next_month - timedelta(days=1), today)
             month = cursor.strftime("%Y-%m")
+            if month in completed_health_months:
+                LOG.info("Resume: health month %s already committed; skipping", month)
+                cursor = next_month
+                continue
             LOG.info("Fetching full-month Garmin health history %s (%s..%s)",
                      month, month_start, month_end)
             health = fetch_month_health(cli, month, today=today)
@@ -256,14 +296,26 @@ def main_full() -> None:
                     con, source, batch_rows, run_id, batch_size)
                 if source == "weight_measurements":
                     weight_rows += len(batch_rows)
-            LOG.info("Health month %s committed: %d source groups", month, len(by_source))
+            mark_completed(con, "health_month", [month])
+            completed_health_months.add(month)
+            LOG.info("Health month %s committed and checkpointed: %d source groups",
+                     month, len(by_source))
             cursor = next_month
 
         # Fetch activity details in bounded groups. Each group is checked against
         # its matching summary IDs before it is committed.
         summaries = list(summaries_by_id.values())
-        for offset in range(0, len(summaries), batch_size):
-            summary_batch = summaries[offset:offset + batch_size]
+        completed_activity_ids = completed_items(con, "activity_detail")
+        pending_summaries = [
+            summary for summary in summaries
+            if str(summary.get("activityId", summary.get("activity_id", summary.get("id"))))
+            not in completed_activity_ids
+        ]
+        LOG.info("Resume: %d/%d activity details already committed; %d remain",
+                 len(completed_activity_ids.intersection(summaries_by_id)),
+                 len(summaries), len(pending_summaries))
+        for offset in range(0, len(pending_summaries), batch_size):
+            summary_batch = pending_summaries[offset:offset + batch_size]
             activities = activity_records(cli, summary_batch)
             expected_ids = {
                 str(row.get("activityId", row.get("activity_id", row.get("id"))))
@@ -290,6 +342,11 @@ def main_full() -> None:
             if device_rows:
                 total_loaded += load_in_batches(
                     con, "devices", device_rows, run_id, batch_size)
+            batch_activity_ids = [
+                str(row.get("summary", {}).get("activityId")) for row in activities
+            ]
+            mark_completed(con, "activity_detail", batch_activity_ids)
+            completed_activity_ids.update(batch_activity_ids)
             activity_count += len(activities)
             mapped_activities += sum(
                 1 for row in activities
