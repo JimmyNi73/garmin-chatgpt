@@ -209,7 +209,7 @@ def initialize_full_rebuild(con, run_id: str) -> bool:
     if run_id in completed_items(con, "full_rebuild_initialized"):
         LOG.warning("Resume existing full rebuild %s: data tables and checkpoints retained", run_id)
         return False
-    for schema in ("raw", "core"):
+    for schema in ("raw", "core", "mart"):
         table_names = [
             row[0] for row in con.execute(
                 "SELECT table_name FROM information_schema.tables "
