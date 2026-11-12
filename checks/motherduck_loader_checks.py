@@ -181,6 +181,13 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(load_records(con, "steps", metrics, "test-run"), 2)
 
         self.assertEqual(con.execute("SELECT count(*) FROM core.activities").fetchone()[0], 2)
+        core_payload = con.execute(
+            "SELECT source_payload::VARCHAR FROM core.activities WHERE activity_id='a-1'"
+        ).fetchone()[0]
+        raw_payload = con.execute(
+            "SELECT payload::VARCHAR FROM raw.activities WHERE record_key='a-1'"
+        ).fetchone()[0]
+        self.assertEqual(json.loads(core_payload), json.loads(raw_payload))
         self.assertEqual(con.execute("SELECT count(*) FROM core.activity_workouts").fetchone()[0], 1)
         self.assertEqual(con.execute("SELECT count(*) FROM core.daily_metrics").fetchone()[0], 2)
         self.assertEqual(
