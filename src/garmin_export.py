@@ -728,10 +728,11 @@ def optional_daily(cli: GarminCLI, unavailable: list[dict[str, str]],
                                 label, attempt, wait, message)
                     time.sleep(wait)
                     continue
-                LOG.warning("%s failed after 3 attempts; recording unavailable and continuing: %s",
-                            label, message)
-                unavailable.append({"source": label, "reason": "failed after 3 attempts: " + message})
-                return True, None
+                LOG.error("%s failed after 3 transient attempts; aborting month to avoid false completeness: %s",
+                           label, message)
+                raise RuntimeError(
+                    f"{label} failed after 3 transient attempts; month must not be checkpointed"
+                ) from exc
             if re.search(r"\b404\b|no data available|no data for (?:this )?(?:date|period)", message, re.I):
                 LOG.info("%s: no data available", label)
                 return True, None
