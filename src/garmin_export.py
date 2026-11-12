@@ -748,14 +748,11 @@ def fetch_month_health(cli: GarminCLI, month: str,
     month_start, month_end = month_bounds(month)
     run_date = today or datetime.now(TZ).date()
     end_date = min(date.fromisoformat(month_end), run_date)
-    if month == run_date.strftime("%Y-%m"):
-        # Current health snapshot: inclusive 30-day window, always ending today.
-        start_date = run_date - timedelta(days=29)
-        history_scope = "rolling_30_days"
-    else:
-        # Historical recovery keeps the original complete-month behavior.
-        start_date = date.fromisoformat(month_start)
-        history_scope = "full_month_all_available_dates"
+    # Full-history ingestion must use identical calendar-month boundaries
+    # for historical and current data. The incremental exporter has its own
+    # rolling-window behavior; it must not define the historical backfill.
+    start_date = date.fromisoformat(month_start)
+    history_scope = "full_month_all_available_dates"
     start = start_date.isoformat()
     end = end_date.isoformat()
     errors: list[dict[str, str]] = []
