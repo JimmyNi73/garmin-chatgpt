@@ -59,7 +59,7 @@ jobs:
           MOTHERDUCK_DATABASE: garmin_github
           MOTHERDUCK_BATCH_SIZE: "100"
           GARMIN_HISTORY_MODE: "full"
-          GARMIN_REQUEST_PAUSE_SECONDS: "1"
-          GARMIN_BATCH_PAUSE_SECONDS: "20"
+          GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
+          GARMIN_BATCH_PAUSE_SECONDS: "5"
           GARMIN_MAX_RETRIES: "8"
         run: python src/motherduck_export.py
