@@ -1,5 +1,5 @@
 name: Garmin to MotherDuck | Full History
-# [run-garmin-full] Rebuild from Dropbox JSON archive into source-specific RAW tables.
+# Full rebuild sourced directly from Garmin Personal API. Dropbox is not used.
 
 on:
   workflow_dispatch:
@@ -27,10 +27,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: python -m pip install --upgrade garmin-connect-personal-api-python duckdb==1.5.6 dropbox
+        run: python -m pip install --upgrade garmin-connect-personal-api-python duckdb==1.5.6
 
       - name: Validate Python syntax
-        run: python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_backfill.py
+        run: python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_export.py
 
       - name: Validate ingestion logic
         run: python -m unittest discover -s checks -p '*_checks.py' -v
@@ -50,14 +50,16 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: python -m pip install --upgrade garmin-connect-personal-api-python duckdb==1.5.6 dropbox
+        run: python -m pip install --upgrade garmin-connect-personal-api-python duckdb==1.5.6
 
       - name: Load complete Garmin history into MotherDuck
         env:
-          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
-          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
-          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
           MOTHERDUCK_DATABASE: garmin_github
           MOTHERDUCK_BATCH_SIZE: "100"
-        run: python src/motherduck_backfill.py
+          GARMIN_HISTORY_MODE: "full"
+          GARMIN_REQUEST_PAUSE_SECONDS: "1"
+          GARMIN_BATCH_PAUSE_SECONDS: "20"
+          GARMIN_MAX_RETRIES: "8"
+        run: python src/motherduck_export.py
