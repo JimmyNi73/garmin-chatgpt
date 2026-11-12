@@ -1,9 +1,6 @@
 name: Garmin to MotherDuck | Bounded Test
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       confirm_run:
@@ -55,4 +52,4 @@ jobs:
           MOTHERDUCK_BATCH_SIZE: "100"
         run: python src/motherduck_export.py
 
-# [run-garmin-test] Validate all ZIP windows and canonical sleep/weight/VO2 views.
+# Manual Garmin-only bounded test; no Dropbox or ZIP input.
