@@ -1,0 +1,1 @@
+Trigger commit for the full Garmin history resume run.
