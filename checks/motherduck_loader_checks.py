@@ -1,4 +1,5 @@
 import unittest
+import json
 
 import duckdb
 
@@ -79,6 +80,27 @@ class LoaderTests(unittest.TestCase):
             FROM core.activities WHERE activity_id = 'legacy-order-1'
         """).fetchone()
         self.assertEqual(actual, (49.5, "device-1", "gear-1", 1120.0, 3.4, 68.0))
+
+    def test_source_specific_raw_table_preserves_complete_record(self):
+        con = duckdb.connect(":memory:")
+        self.addCleanup(con.close)
+        ensure_schema(con)
+        record = {
+            "calendarDate": "2011-12-01",
+            "source_payload": {
+                "calendarDate": "2011-12-01",
+                "restingHeartRate": None,
+                "maxHeartRate": 123,
+                "heartRateValues": [[1322697600001, 123]],
+            },
+            "record_scope": "daily_snapshot",
+        }
+        self.assertEqual(load_records(con, "heart_rate", [record], "test-run"), 1)
+        raw = con.execute(
+            "SELECT payload::VARCHAR FROM raw.heart_rate"
+        ).fetchone()[0]
+        self.assertEqual(json.loads(raw), record)
+
 
     def test_empty_health_placeholder_stays_raw_only(self):
         con = duckdb.connect(":memory:")
