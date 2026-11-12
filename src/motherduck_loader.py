@@ -80,6 +80,29 @@ def connect(database: str | None = None) -> duckdb.DuckDBPyConnection:
     return duckdb.connect(f"md:{target}")
 
 
+def _raw_source_table(source_name: str) -> str:
+    """Return a safe, source-specific RAW table identifier."""
+    name = re.sub(r"[^a-z0-9_]+", "_", source_name.lower()).strip("_")
+    if not name or not re.match(r"^[a-z_]", name):
+        raise ValueError(f"Invalid RAW source name: {source_name!r}")
+    return f"raw.{name}"
+
+
+def ensure_raw_source_table(con: duckdb.DuckDBPyConnection, source_name: str) -> str:
+    table = _raw_source_table(source_name)
+    con.execute(f"""
+        CREATE TABLE IF NOT EXISTS {table} (
+            record_key VARCHAR NOT NULL,
+            event_date DATE,
+            payload JSON NOT NULL,
+            source_run_id VARCHAR NOT NULL,
+            loaded_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (record_key)
+        )
+    """)
+    return table
+
+
 def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("CREATE SCHEMA IF NOT EXISTS raw")
     con.execute("CREATE SCHEMA IF NOT EXISTS core")
@@ -202,6 +225,19 @@ def load_records(con: duckdb.DuckDBPyConnection, source_name: str,
         _bulk_insert(con, "raw.garmin_payloads", raw_rows,
             "?, ?, TRY_CAST(? AS DATE), ?::JSON, ?, ?",
             """ON CONFLICT (source_name, record_key) DO UPDATE SET
+                event_date=excluded.event_date, payload=excluded.payload,
+                source_run_id=excluded.source_run_id, loaded_at=excluded.loaded_at""")
+
+        # A physical RAW table per Garmin source; store each complete loader record.
+        source_table = ensure_raw_source_table(con, source_name)
+        source_raw_rows = [
+            (stable_record_key(source_name, record, index), event_date(record),
+             _json(record), source_run_id, loaded_at)
+            for index, record in enumerate(rows)
+        ]
+        _bulk_insert(con, source_table, source_raw_rows,
+            "?, TRY_CAST(? AS DATE), ?::JSON, ?, ?",
+            """ON CONFLICT (record_key) DO UPDATE SET
                 event_date=excluded.event_date, payload=excluded.payload,
                 source_run_id=excluded.source_run_id, loaded_at=excluded.loaded_at""")
 
