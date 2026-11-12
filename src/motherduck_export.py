@@ -534,18 +534,23 @@ def activity_day(summary: dict) -> date:
 
 
 def truncate_source_tables(con) -> None:
-    """Clear every physical ingestion table; views are derived and must not be truncated."""
-    tables = (
-        "raw.garmin_payloads",
-        "core.activities",
-        "core.activity_workouts",
-        "core.daily_metrics",
-        "core.devices",
-        "core.gear",
-    )
-    for table in tables:
-        LOG.warning("TRUNCATING %s", table)
-        con.execute(f"TRUNCATE TABLE {table}")
+    """Clear all physical RAW/CORE ingestion tables, retaining only run checkpoints."""
+    ensure_progress_table(con)
+    for schema in ("raw", "core"):
+        table_names = [
+            row[0] for row in con.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = ? AND table_type = 'BASE TABLE'",
+                [schema],
+            ).fetchall()
+        ]
+        for table_name in table_names:
+            if schema == "raw" and table_name == "garmin_ingestion_progress":
+                continue
+            if not table_name.replace("_", "").isalnum():
+                raise RuntimeError(f"Unexpected table identifier: {table_name!r}")
+            LOG.warning("TRUNCATING %s.%s", schema, table_name)
+            con.execute(f"TRUNCATE TABLE {schema}.{table_name}")
 
 
 def main_test() -> None:
