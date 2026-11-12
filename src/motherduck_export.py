@@ -372,6 +372,10 @@ def main_full() -> None:
                     "metadata": health.get("metadata", {}),
                     "source_errors": health.get("source_errors", []),
                     "unavailable_sources": health.get("unavailable_sources", []),
+                    "unsupported_sources": [{
+                        "source": "training_readiness",
+                        "reason": "Not exposed by the documented Garmin Personal API endpoints or supported gc-personal CLI",
+                    }],
                 },
             }
             total_loaded += load_checkpointed_batches(
