@@ -302,6 +302,15 @@ def main_full() -> None:
     if not activity_dates:
         raise RuntimeError("Garmin activity index has no usable dates")
 
+    # Fetch profile and heart-rate-zone snapshots before any destructive write.
+    # These are part of the Garmin export contract even though they are not daily metrics.
+    metadata_errors: list[dict[str, str]] = []
+    profile_ok, profile = optional(cli, metadata_errors, "profile-settings", "profile-settings")
+    zones_ok, heart_rate_zones = optional(
+        cli, metadata_errors, "heart-rate-zones", "heart-rate-zones")
+    if metadata_errors or not profile_ok or not zones_ok:
+        raise RuntimeError(f"Garmin profile metadata preflight failed: {metadata_errors}")
+
     # Gear is optional metadata; fetch it before activity batches so every
     # activity batch is enriched consistently.
     try:
@@ -322,6 +331,16 @@ def main_full() -> None:
         # A new GitHub run starts with a clean rebuild. Re-running the same
         # workflow run preserves committed data and checkpoints, avoiding loss.
         initialize_full_rebuild(con, run_id)
+
+        for source_name, payload in (
+            ("profile_settings", profile),
+            ("heart_rate_zones", heart_rate_zones),
+        ):
+            if payload is not None:
+                total_loaded += load_checkpointed_batches(
+                    con, source_name,
+                    [{"record_scope": "profile_snapshot", "source_payload": payload}],
+                    run_id, batch_size, "profile_snapshot")
 
         # Health is fetched and committed one month at a time. A failed later
         # month does not discard earlier committed work; stable keys make reruns
@@ -346,7 +365,19 @@ def main_full() -> None:
             if health.get("metadata", {}).get("export_status") != "complete":
                 raise RuntimeError(
                     f"Health source errors for {month}: {health.get('source_errors', [])}")
-            by_source: dict[str, list[dict]] = {}
+            availability_record = {
+                "record_scope": "month_source_availability",
+                "source_payload": {
+                    "month": month,
+                    "metadata": health.get("metadata", {}),
+                    "source_errors": health.get("source_errors", []),
+                    "unavailable_sources": health.get("unavailable_sources", []),
+                },
+            }
+            total_loaded += load_checkpointed_batches(
+                con, "source_availability", [availability_record],
+                run_id, batch_size, month)
+            by_source: dict[str, list[dict]] = {};
             for row in health_records("health", health, month_start, month_end):
                 source = row.pop("metric_source")
                 by_source.setdefault(source, []).append(row)
