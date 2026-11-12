@@ -323,7 +323,7 @@ def main_full() -> None:
                 continue
             LOG.info("Fetching full-month Garmin health history %s (%s..%s)",
                      month, month_start, month_end)
-            health = fetch_month_health(cli, month, today=today)
+            health = fetch_month_health(cli, month, today=today, full_month=True)
             if health.get("metadata", {}).get("export_status") != "complete":
                 raise RuntimeError(
                     f"Health source errors for {month}: {health.get('source_errors', [])}")
