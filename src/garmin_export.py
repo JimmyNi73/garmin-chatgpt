@@ -768,6 +768,7 @@ def fetch_month_health(cli: GarminCLI, month: str,
     sources = {
         "stress": "stress",
         "steps": "steps",
+        "hydration": "hydration",
         "weight_measurements": "weight-measurements",
         "weight_goals": "effective-weight-goals",
         "sleep_summaries": "sleep-summaries",
