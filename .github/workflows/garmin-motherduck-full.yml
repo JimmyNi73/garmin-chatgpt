@@ -1,4 +1,5 @@
 name: Garmin to MotherDuck | Full History
+# [run-garmin-full] Resume ingestion using persisted MotherDuck checkpoints.
 
 on:
   workflow_dispatch:
