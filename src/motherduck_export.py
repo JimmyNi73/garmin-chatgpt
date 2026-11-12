@@ -109,6 +109,11 @@ def health_records(source: str, health: dict, allowed_start: date,
                 if signature not in seen_samples:
                     seen_samples.add(signature)
                     out.append({"metric_source": metric, **sample})
+            # Preserve the complete Garmin range response as well as individual
+            # weigh-ins; envelopes remain RAW-only and never become fake metrics.
+            if raw is not None:
+                out.append({"metric_source": metric, "calendarDate": None,
+                            "record_scope": "range_response", "source_payload": raw})
             continue
         if isinstance(by_date, dict):
             for day, payload in by_date.items():
@@ -119,10 +124,10 @@ def health_records(source: str, health: dict, allowed_start: date,
                 if allowed_start <= d <= allowed_end and isinstance(payload, dict):
                     out.append({"metric_source": metric, "calendarDate": d.isoformat(),
                                 "source_payload": payload})
-        if raw is not None and not by_date:
-            # HRV summaries are returned as a rolling range, even when the caller
-            # requested a narrower month/test window. Clip nested dates before
-            # retaining the raw envelope so no out-of-window days leak into RAW.
+        if raw is not None:
+            # Preserve the complete source response envelope in RAW in addition
+            # to date-indexed records. HRV summaries are returned as a rolling
+            # range, so clip nested dates to the requested month/test window.
             if metric == "hrv_summaries" and isinstance(raw, dict):
                 raw = dict(raw)
                 for key in ("hrvSummaries", "hrv_summaries"):
@@ -134,9 +139,8 @@ def health_records(source: str, health: dict, allowed_start: date,
                             and date_of(item) is not None
                             and allowed_start <= date.fromisoformat(date_of(item)) <= allowed_end
                         ]
-            # Retain unindexed source response as one complete RAW record.
             out.append({"metric_source": metric, "calendarDate": None,
-                        "source_payload": raw})
+                        "record_scope": "range_response", "source_payload": raw})
     for day, payload in health.get("by_date", {}).items():
         try:
             d = date.fromisoformat(str(day)[:10])
