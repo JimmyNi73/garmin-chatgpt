@@ -116,8 +116,11 @@ class ExportHelperTests(unittest.TestCase):
                                       ("2026-11-01", "2026-11-07")])
         self.assertEqual(len(result["by_date"]), 30)
         fitness_age_calls = [label for label, _ in cli.calls if label.startswith("fitness-age ")]
+        food_log_calls = [label for label, _ in cli.calls if label.startswith("food-logs ")]
         self.assertEqual(len(fitness_age_calls), 30)
-        self.assertIn("fitness_age", result["by_date"]["2026-11-07"])
+        self.assertEqual(len(food_log_calls), 30)
+        self.assertIn("hydration", result["range_data"])
+        self.assertIn("food_logs", result["by_date"]["2026-11-07"])
 
     def test_stress_and_steps_merge_month_segments(self):
         class SegmentCLI:
