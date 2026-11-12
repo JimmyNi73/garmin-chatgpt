@@ -288,6 +288,23 @@ def main_full() -> None:
         ensure_schema(con)
         ensure_progress_table(con)
 
+        # Full rebuild: clear every physical RAW and CORE table, including
+        # source-specific RAW tables created by earlier runs, and reset checkpoints.
+        # Do this only after Garmin activity-index preflight has succeeded.
+        for schema in ("raw", "core"):
+            table_names = [
+                row[0] for row in con.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = ? AND table_type = 'BASE TABLE'",
+                    [schema],
+                ).fetchall()
+            ]
+            for table_name in table_names:
+                if not table_name.replace("_", "").isalnum():
+                    raise RuntimeError(f"Unexpected table identifier: {table_name!r}")
+                con.execute(f"TRUNCATE TABLE {schema}.{table_name}")
+        LOG.warning("Full Garmin rebuild: truncated all RAW/CORE base tables and reset progress")
+
         # Health is fetched and committed one month at a time. A failed later
         # month does not discard earlier committed work; stable keys make reruns
         # idempotent. Every month is validated before its records are written.
