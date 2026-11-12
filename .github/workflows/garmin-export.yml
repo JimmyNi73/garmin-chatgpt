@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Garmin client
-        run: python -m pip install --upgrade garmin-connect-personal-api-python dropbox
+        run: python -m pip install --upgrade garmin-connect-personal-api-python duckdb==1.5.6 dropbox
 
       - name: Validate Python syntax
         run: python -m py_compile src/garmin_export.py
