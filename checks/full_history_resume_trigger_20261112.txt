@@ -1,3 +1,2 @@
-Trigger a fresh validated full-history resume run after fixing the export workflow dependency.
-
-Full rebuild now uses Dropbox JSON source archive and source-specific RAW tables.
+Trigger a full-history rebuild sourced directly from Garmin Personal API.
+Dropbox is not used as an ingestion source.
