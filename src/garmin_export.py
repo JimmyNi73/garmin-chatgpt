@@ -257,8 +257,17 @@ class GarminCLI:
         for attempt in range(MAX_RETRIES + 1):
             if self.request_count:
                 time.sleep(REQUEST_PAUSE)
-            result = subprocess.run(command, capture_output=True, text=True,
-                                    encoding="utf-8", errors="replace", timeout=180)
+            try:
+                result = subprocess.run(command, capture_output=True, text=True,
+                                        encoding="utf-8", errors="replace", timeout=180)
+            except subprocess.TimeoutExpired as exc:
+                if attempt >= MAX_RETRIES:
+                    raise RuntimeError(f"{label} timed out after {MAX_RETRIES + 1} attempts") from exc
+                wait = min(60, 5 * (attempt + 1)) + random.uniform(0, 2)
+                LOG.warning("%s timed out; retrying in %.0f sec (attempt %d/%d)",
+                            label, wait, attempt + 1, MAX_RETRIES)
+                time.sleep(wait)
+                continue
             if result.returncode == 0:
                 self.request_count += 1
                 if self.request_count % REQUESTS_BETWEEN_PAUSES == 0:
@@ -273,10 +282,19 @@ class GarminCLI:
                 except json.JSONDecodeError as exc:
                     raise RuntimeError(f"{label}: invalid JSON: {exc}") from exc
             wait = retry_after(result.stderr)
+            transient_network_error = bool(re.search(
+                r"SSL|UNEXPECTED_EOF|EOF occurred|connection (?:reset|aborted|error)|"
+                r"remote end closed|remote disconnected|max retries exceeded|"
+                r"temporarily unavailable|timed? out|name or service not known",
+                result.stderr or "", re.I,
+            ))
+            if wait is None and transient_network_error:
+                wait = min(60, 5 * (attempt + 1))
             if wait is None or attempt >= MAX_RETRIES:
                 raise RuntimeError(f"{label} failed: {result.stderr.strip()}")
             wait += random.uniform(0, 2)
-            LOG.warning("%s rate limited; retrying in %.0f sec", label, wait)
+            LOG.warning("%s transient Garmin failure; retrying in %.0f sec (%d/%d)",
+                        label, wait, attempt + 1, MAX_RETRIES)
             time.sleep(wait)
         raise RuntimeError(f"{label}: retry limit reached")
 
