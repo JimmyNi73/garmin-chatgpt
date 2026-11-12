@@ -538,6 +538,15 @@ def main_full() -> None:
             raise RuntimeError(
                 f"CORE activity ID parity failed: Garmin={len(summaries_by_id)}, "
                 f"CORE={len(core_activity_ids)}")
+        core_payload_mismatches = con.execute("""
+            SELECT count(*)
+            FROM core.activities c
+            JOIN raw.activities r ON r.record_key = c.activity_id
+            WHERE c.source_payload IS DISTINCT FROM r.payload
+        """).fetchone()[0]
+        if core_payload_mismatches:
+            raise RuntimeError(
+                f"CORE activity payload preservation failed: {core_payload_mismatches} mismatches")
         mapped_count = con.execute(
             "SELECT count(*) FROM core.activities WHERE gear_id IS NOT NULL"
         ).fetchone()[0]
