@@ -6,6 +6,7 @@ database operations. Gear and weight metadata are fetched directly from Garmin.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -198,6 +199,33 @@ def mark_completed(con, phase: str, item_keys: list[str]) -> None:
     """, [(phase, str(key)) for key in item_keys])
 
 
+def load_checkpointed_batches(con, source: str, rows: list[dict], run_id: str,
+                              batch_size: int, scope: str) -> int:
+    """Load only batches without a matching durable content checkpoint.
+
+    The key includes a hash of the canonical batch content. If Garmin changes
+    data later, the changed batch is loaded instead of being skipped.
+    """
+    loaded = 0
+    for offset in range(0, len(rows), batch_size):
+        batch_index = offset // batch_size
+        batch = rows[offset:offset + batch_size]
+        canonical = json.dumps(batch, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        item_key = f"{scope}|{source}|{batch_index}|{digest}"
+        if item_key in completed_items(con, "health_batch"):
+            LOG.info("Resume: source=%s scope=%s batch=%d already committed; skipping",
+                     source, scope, batch_index + 1)
+            continue
+        count = load_records(con, source, batch, run_id)
+        loaded += count
+        # Checkpoint only after load_records has committed its transaction.
+        mark_completed(con, "health_batch", [item_key])
+        LOG.info("MotherDuck checkpointed batch: source=%s scope=%s rows=%d batch=%d",
+                 source, scope, count, batch_index + 1)
+    return loaded
+
+
 def main_full() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -292,8 +320,8 @@ def main_full() -> None:
                 unique = {json.dumps(row, sort_keys=True, ensure_ascii=False, default=str): row
                           for row in rows}
                 batch_rows = list(unique.values())
-                total_loaded += load_in_batches(
-                    con, source, batch_rows, run_id, batch_size)
+                total_loaded += load_checkpointed_batches(
+                    con, source, batch_rows, run_id, batch_size, month)
                 if source == "weight_measurements":
                     weight_rows += len(batch_rows)
             mark_completed(con, "health_month", [month])
