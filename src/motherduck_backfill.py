@@ -209,18 +209,46 @@ def main() -> None:
     con = connect()
     try:
         ensure_schema(con)
+
+        # Destructive rebuild only after the complete Dropbox archive passes preflight.
+        for schema in ("raw", "core"):
+            table_names = [
+                row[0] for row in con.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = ? AND table_type = 'BASE TABLE'",
+                    [schema],
+                ).fetchall()
+            ]
+            for table_name in table_names:
+                if not table_name.replace("_", "").isalnum():
+                    raise RuntimeError(f"Unexpected table identifier: {table_name!r}")
+                con.execute(f"TRUNCATE TABLE {schema}.{table_name}")
+        LOG.info("Truncated all existing RAW and CORE base tables after Dropbox preflight")
+
         for source, rows in datasets.items():
             loaded = load_records(con, source, rows, run_id)
-            LOG.info("Loaded %s: %d records", source, loaded)
+            if loaded != len(rows):
+                raise RuntimeError(
+                    f"Load count mismatch for {source}: expected {len(rows)}, loaded {loaded}"
+                )
+            if rows:
+                raw_count = con.execute(
+                    f"SELECT count(*) FROM raw.{source}"
+                ).fetchone()[0]
+                if raw_count != len(rows):
+                    raise RuntimeError(
+                        f"RAW parity failed for {source}: Dropbox={len(rows)}, RAW={raw_count}"
+                    )
+            LOG.info("Loaded and validated RAW.%s: %d records", source, loaded)
 
         model_path = __import__("pathlib").Path(__file__).resolve().parents[1] / "sql" / "garmin_motherduck_model.sql"
         con.execute(model_path.read_text(encoding="utf-8"))
 
         actual_activities = con.execute("SELECT count(*) FROM core.activities").fetchone()[0]
         expected_activities = stats["unique_activities"]
-        if actual_activities < expected_activities:
+        if actual_activities != expected_activities:
             raise RuntimeError(
-                f"CORE activity validation failed: expected at least {expected_activities}, "
+                f"CORE activity validation failed: expected {expected_activities}, "
                 f"found {actual_activities}"
             )
         duplicates = con.execute("""
