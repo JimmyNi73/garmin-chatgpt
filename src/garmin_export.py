@@ -779,7 +779,7 @@ def fetch_month_health(cli: GarminCLI, month: str,
     }
     for field, command in sources.items():
         label = f"{command} {month}"
-        if field in ("stress", "steps"):
+        if field in ("stress", "steps", "hydration"):
             # Garmin rejects date ranges that cross a calendar-month boundary.
             # Query each calendar month separately, then merge the date-indexed rows.
             merged_by_date: dict[str, Any] = {}
