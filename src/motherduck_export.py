@@ -213,14 +213,14 @@ def load_checkpointed_batches(con, source: str, rows: list[dict], run_id: str,
         canonical = json.dumps(batch, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         item_key = f"{scope}|{source}|{batch_index}|{digest}"
-        if item_key in completed_items(con, "health_batch"):
+        if item_key in completed_items(con, f"health_batch:{run_id}"):
             LOG.info("Resume: source=%s scope=%s batch=%d already committed; skipping",
                      source, scope, batch_index + 1)
             continue
         count = load_records(con, source, batch, run_id)
         loaded += count
         # Checkpoint only after load_records has committed its transaction.
-        mark_completed(con, "health_batch", [item_key])
+        mark_completed(con, f"health_batch:{run_id}", [item_key])
         LOG.info("MotherDuck checkpointed batch: source=%s scope=%s rows=%d batch=%d",
                  source, scope, count, batch_index + 1)
     return loaded
@@ -241,7 +241,7 @@ def main_full() -> None:
              history_mode, batch_size)
 
     today = datetime.now(TZ).date()
-    run_id = str(uuid.uuid4())
+    run_id = os.getenv("GITHUB_RUN_ID") or str(uuid.uuid4())
     cli = GarminCLI()
     summaries_by_id: dict[str, dict] = {}
 
@@ -288,9 +288,9 @@ def main_full() -> None:
         ensure_schema(con)
         ensure_progress_table(con)
 
-        # Full rebuild: clear every physical RAW and CORE table, including
-        # source-specific RAW tables created by earlier runs, and reset checkpoints.
-        # Do this only after Garmin activity-index preflight has succeeded.
+        # Full rebuild: clear every physical RAW and CORE table except the
+        # durable checkpoint table. Checkpoints are scoped by GitHub run ID so
+        # rerunning the same failed workflow resumes, while a new run starts fresh.
         for schema in ("raw", "core"):
             table_names = [
                 row[0] for row in con.execute(
@@ -300,15 +300,18 @@ def main_full() -> None:
                 ).fetchall()
             ]
             for table_name in table_names:
+                if schema == "raw" and table_name == "garmin_ingestion_progress":
+                    continue
                 if not table_name.replace("_", "").isalnum():
                     raise RuntimeError(f"Unexpected table identifier: {table_name!r}")
                 con.execute(f"TRUNCATE TABLE {schema}.{table_name}")
-        LOG.warning("Full Garmin rebuild: truncated all RAW/CORE base tables and reset progress")
+        LOG.warning("Full Garmin rebuild: truncated RAW/CORE data tables; durable checkpoints retained")
 
         # Health is fetched and committed one month at a time. A failed later
         # month does not discard earlier committed work; stable keys make reruns
         # idempotent. Every month is validated before its records are written.
-        completed_health_months = completed_items(con, "health_month")
+        health_month_phase = f"health_month:{run_id}"
+        completed_health_months = completed_items(con, health_month_phase)
         first_month = min(activity_dates).replace(day=1)
         cursor = first_month
         while cursor <= today:
@@ -341,7 +344,7 @@ def main_full() -> None:
                     con, source, batch_rows, run_id, batch_size, month)
                 if source == "weight_measurements":
                     weight_rows += len(batch_rows)
-            mark_completed(con, "health_month", [month])
+            mark_completed(con, health_month_phase, [month])
             completed_health_months.add(month)
             LOG.info("Health month %s committed and checkpointed: %d source groups",
                      month, len(by_source))
@@ -350,7 +353,8 @@ def main_full() -> None:
         # Fetch activity details in bounded groups. Each group is checked against
         # its matching summary IDs before it is committed.
         summaries = list(summaries_by_id.values())
-        completed_activity_ids = completed_items(con, "activity_detail")
+        activity_phase = f"activity_detail:{run_id}"
+        completed_activity_ids = completed_items(con, activity_phase)
         pending_summaries = [
             summary for summary in summaries
             if str(summary.get("activityId", summary.get("activity_id", summary.get("id"))))
@@ -390,7 +394,7 @@ def main_full() -> None:
             batch_activity_ids = [
                 str(row.get("summary", {}).get("activityId")) for row in activities
             ]
-            mark_completed(con, "activity_detail", batch_activity_ids)
+            mark_completed(con, activity_phase, batch_activity_ids)
             completed_activity_ids.update(batch_activity_ids)
             activity_count += len(activities)
             mapped_activities += sum(
