@@ -199,6 +199,33 @@ def mark_completed(con, phase: str, item_keys: list[str]) -> None:
     """, [(phase, str(key)) for key in item_keys])
 
 
+def initialize_full_rebuild(con, run_id: str) -> bool:
+    """Truncate ingestion data once per GitHub run; preserve checkpoints on rerun."""
+    ensure_progress_table(con)
+    if run_id in completed_items(con, "full_rebuild_initialized"):
+        LOG.warning("Resume existing full rebuild %s: data tables and checkpoints retained", run_id)
+        return False
+    for schema in ("raw", "core"):
+        table_names = [
+            row[0] for row in con.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = ? AND table_type = 'BASE TABLE'",
+                [schema],
+            ).fetchall()
+        ]
+        for table_name in table_names:
+            if schema == "raw" and table_name == "garmin_ingestion_progress":
+                continue
+            if not table_name.replace("_", "").isalnum():
+                raise RuntimeError(f"Unexpected table identifier: {table_name!r}")
+            con.execute(f"TRUNCATE TABLE {schema}.{table_name}")
+    # Write the marker only after truncation has fully completed. A crash before
+    # this point is safe: no source writes have started and the next attempt truncates again.
+    mark_completed(con, "full_rebuild_initialized", [run_id])
+    LOG.warning("Started clean Garmin full rebuild %s; all RAW/CORE data tables truncated", run_id)
+    return True
+
+
 def load_checkpointed_batches(con, source: str, rows: list[dict], run_id: str,
                               batch_size: int, scope: str) -> int:
     """Load only batches without a matching durable content checkpoint.
@@ -288,24 +315,9 @@ def main_full() -> None:
         ensure_schema(con)
         ensure_progress_table(con)
 
-        # Full rebuild: clear every physical RAW and CORE table except the
-        # durable checkpoint table. Checkpoints are scoped by GitHub run ID so
-        # rerunning the same failed workflow resumes, while a new run starts fresh.
-        for schema in ("raw", "core"):
-            table_names = [
-                row[0] for row in con.execute(
-                    "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = ? AND table_type = 'BASE TABLE'",
-                    [schema],
-                ).fetchall()
-            ]
-            for table_name in table_names:
-                if schema == "raw" and table_name == "garmin_ingestion_progress":
-                    continue
-                if not table_name.replace("_", "").isalnum():
-                    raise RuntimeError(f"Unexpected table identifier: {table_name!r}")
-                con.execute(f"TRUNCATE TABLE {schema}.{table_name}")
-        LOG.warning("Full Garmin rebuild: truncated RAW/CORE data tables; durable checkpoints retained")
+        # A new GitHub run starts with a clean rebuild. Re-running the same
+        # workflow run preserves committed data and checkpoints, avoiding loss.
+        initialize_full_rebuild(con, run_id)
 
         # Health is fetched and committed one month at a time. A failed later
         # month does not discard earlier committed work; stable keys make reruns
@@ -427,23 +439,77 @@ def main_full() -> None:
         else:
             LOG.warning("No VO2 values returned in documented activity summaries")
 
-        if weight_rows == 0:
-            LOG.warning("Garmin returned no weight measurements in the selected windows")
-        LOG.info("FULL-HISTORY ingestion committed: %d activities, %d with gear, "
-                 "%d gear items, %d weight records, %d Garmin requests, run=%s",
-                 activity_count, mapped_activities, len(gear_registry), weight_rows,
-                 cli.request_count, run_id)
+        # Validate the committed source layer before publishing CORE/MART views.
+        expected_months = []
+        cursor = first_month
+        while cursor <= today:
+            expected_months.append(cursor.strftime("%Y-%m"))
+            cursor = (date(cursor.year + 1, 1, 1) if cursor.month == 12
+                      else date(cursor.year, cursor.month + 1, 1))
+        committed_months = completed_items(con, health_month_phase)
+        missing_months = sorted(set(expected_months) - committed_months)
+        if missing_months:
+            raise RuntimeError(f"Health month checkpoint validation failed: {missing_months[:10]}")
+        committed_activity_ids = completed_items(con, activity_phase)
+        missing_activity_ids = set(summaries_by_id) - committed_activity_ids
+        if missing_activity_ids:
+            raise RuntimeError(
+                f"Activity checkpoint validation failed: {len(missing_activity_ids)} IDs missing")
 
-        # Publish relational models only after all source retrieval and batch
-        # writes have completed successfully.
-        model_path = Path(__file__).resolve().parents[1] / "sql" / "garmin_motherduck_model.sql"
-        con.execute(model_path.read_text(encoding="utf-8"))
-        counts = con.execute("""
+        raw_activity_ids = {
+            str(row[0]) for row in con.execute(
+                "SELECT record_key FROM raw.activities"
+            ).fetchall()
+        }
+        if raw_activity_ids != set(summaries_by_id):
+            raise RuntimeError(
+                f"RAW activity ID parity failed: Garmin={len(summaries_by_id)}, "
+                f"MotherDuck={len(raw_activity_ids)}, missing={len(set(summaries_by_id)-raw_activity_ids)}, "
+                f"unexpected={len(raw_activity_ids-set(summaries_by_id))}")
+
+        # Every source-specific RAW table must exactly mirror generic RAW keys/payloads.
+        source_counts = con.execute("""
             SELECT source_name, count(*) FROM raw.garmin_payloads
             GROUP BY source_name ORDER BY source_name
         """).fetchall()
-        LOG.info("Garmin full-history ingestion succeeded: run=%s loaded=%d counts=%s",
-                 run_id, total_loaded, counts)
+        for source_name, _ in source_counts:
+            table_name = source_name.lower()
+            if not table_name.replace("_", "").isalnum():
+                raise RuntimeError(f"Unexpected RAW source name: {source_name!r}")
+            mismatch = con.execute(f"""
+                SELECT count(*) FROM raw.garmin_payloads g
+                FULL OUTER JOIN raw.{table_name} s ON s.record_key = g.record_key
+                WHERE (g.source_name = ? OR g.source_name IS NULL)
+                  AND (g.record_key IS NULL OR s.record_key IS NULL
+                       OR g.payload IS DISTINCT FROM s.payload)
+            """, [source_name]).fetchone()[0]
+            if mismatch:
+                raise RuntimeError(
+                    f"RAW parity failed for {source_name}: {mismatch} missing/different records")
+
+        # Publish relational models only after source/checkpoint parity passes.
+        model_path = Path(__file__).resolve().parents[1] / "sql" / "garmin_motherduck_model.sql"
+        con.execute(model_path.read_text(encoding="utf-8"))
+        core_activity_ids = {
+            str(row[0]) for row in con.execute("SELECT activity_id FROM core.activities").fetchall()
+        }
+        if core_activity_ids != set(summaries_by_id):
+            raise RuntimeError(
+                f"CORE activity ID parity failed: Garmin={len(summaries_by_id)}, "
+                f"CORE={len(core_activity_ids)}")
+        mapped_count = con.execute(
+            "SELECT count(*) FROM core.activities WHERE gear_id IS NOT NULL"
+        ).fetchone()[0]
+        weight_count = con.execute(
+            "SELECT count(*) FROM raw.weight_measurements"
+        ).fetchone()[0] if con.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_schema='raw' AND table_name='weight_measurements'"
+        ).fetchone()[0] else 0
+        LOG.info("Garmin full-history ingestion succeeded: run=%s activities=%d gear_mapped=%d "
+                 "weight_raw_records=%d requests=%d source_counts=%s",
+                 run_id, len(summaries_by_id), mapped_count, weight_count,
+                 cli.request_count, source_counts)
     finally:
         con.close()
 
