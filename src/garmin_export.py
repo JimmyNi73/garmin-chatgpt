@@ -666,7 +666,7 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
         current[field] = value
         current["source_status"][command] = "ok" if ok else "error"
     for field, command in {
-        "stress": "stress", "steps": "steps",
+        "stress": "stress", "steps": "steps", "hydration": "hydration",
         "weight_measurements": "weight-measurements",
         "weight_goals": "effective-weight-goals",
         "sleep_summaries": "sleep-summaries",
@@ -684,7 +684,7 @@ def build_current(cli: GarminCLI, today: date, old_current: dict[str, Any] | Non
         current["daily"]["by_date"][d] = {}
         for field, command in (("sleep", "sleep"), ("heart_rate", "heart-rate"),
                                ("hrv", "hrv"), ("spo2", "spo2"),
-                               ("fitness_age", "fitness-age")):
+                               ("fitness_age", "fitness-age"), ("food_logs", "food-logs")):
             ok, value = optional(cli, errors, f"{command} {d}", command, "--date", d)
             # A successful empty response is a normal data gap, not an error.
             current["daily"]["by_date"][d][field] = enrich_device_ids(value) if ok else None
@@ -826,7 +826,7 @@ def fetch_month_health(cli: GarminCLI, month: str,
         daily_row: dict[str, Any] = {}
         for field, command in (("sleep", "sleep"), ("heart_rate", "heart-rate"),
                                ("hrv", "hrv"), ("spo2", "spo2"),
-                               ("fitness_age", "fitness-age")):
+                               ("fitness_age", "fitness-age"), ("food_logs", "food-logs")):
             ok, value = optional_daily(cli, unavailable, f"{command} {day}",
                                        command, "--date", day)
             daily_row[field] = enrich_device_ids(value) if ok else None
