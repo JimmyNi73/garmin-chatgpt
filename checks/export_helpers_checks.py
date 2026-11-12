@@ -16,6 +16,15 @@ class FakeCLI:
 
 
 class ExportHelperTests(unittest.TestCase):
+    def test_retry_after_reads_cloudflare_retry_after(self):
+        self.assertEqual(
+            ge.retry_after('{"status":504,"retry_after":120}'),
+            120,
+        )
+
+    def test_retry_after_keeps_rate_limit_fallback(self):
+        self.assertEqual(ge.retry_after("HTTP 429 Too Many Requests"), 30)
+
     def test_fenix6_device_override(self):
         row = ge.enrich_device_ids({
             "summary": {"activityId": 123, "deviceId": 3359313181}
