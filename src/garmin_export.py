@@ -240,10 +240,16 @@ def device_registry(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def retry_after(stderr: str) -> int | None:
-    m = re.search(r'"retryInSeconds"\s*:\s*(\d+)', stderr or "")
-    if m:
-        return max(1, int(m.group(1)))
-    if re.search(r"HTTP\s*429|Too Many Requests", stderr or "", re.I):
+    text = stderr or ""
+    # Honor Garmin/Cloudflare's explicit retry_after in 5xx responses.
+    for pattern in (
+        r'"retryInSeconds"\s*:\s*(\d+)',
+        r'"retry_after"\s*:\s*(\d+)',
+    ):
+        match = re.search(pattern, text, re.I)
+        if match:
+            return max(1, int(match.group(1)))
+    if re.search(r"HTTP\s*429|Too Many Requests", text, re.I):
         return 30
     return None
 
@@ -285,11 +291,13 @@ class GarminCLI:
             transient_network_error = bool(re.search(
                 r"SSL|UNEXPECTED_EOF|EOF occurred|connection (?:reset|aborted|error)|"
                 r"remote end closed|remote disconnected|max retries exceeded|"
-                r"temporarily unavailable|timed? out|name or service not known",
+                r"temporarily unavailable|timed? out|name or service not known|"
+                r"HTTP\\s*5\\d\\d",
                 result.stderr or "", re.I,
             ))
             if wait is None and transient_network_error:
-                wait = min(60, 5 * (attempt + 1))
+                # Retry transient server-side failures with bounded backoff.
+                wait = min(120, 15 * (attempt + 1))
             if wait is None or attempt >= MAX_RETRIES:
                 raise RuntimeError(f"{label} failed: {result.stderr.strip()}")
             wait += random.uniform(0, 2)
