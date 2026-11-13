@@ -1,0 +1,74 @@
+name: Garmin to MotherDock Prod
+run-name: Garmin to MotherDock Prod
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 06:00, 08:00, 14:00, 20:00 and 22:00 Stockholm time.
+    - cron: "0 6,8,14,20,22 * * *"
+      timezone: "Europe/Stockholm"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: garmin-motherduck-production
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install --upgrade garmin-connect-personal-api-python duckdb==1.5.6
+      - name: Validate Python syntax
+        run: python -m py_compile src/garmin_export.py src/motherduck_loader.py src/motherduck_export.py
+      - name: Validate ingestion logic
+        run: python -m unittest discover -s checks -p '*_checks.py' -v
+
+  ingest:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install --upgrade garmin-connect-personal-api-python duckdb==1.5.6
+      - name: Refresh latest 30 days in production MotherDuck
+        env:
+          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+          MOTHERDUCK_DATABASE: garmin_github
+          MOTHERDUCK_BATCH_SIZE: "100"
+          GARMIN_HISTORY_MODE: "rolling"
+          GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
+          GARMIN_BATCH_PAUSE_SECONDS: "5"
+          GARMIN_MAX_RETRIES: "8"
+        run: |
+          for attempt in 1 2 3; do
+            echo "Rolling 30-day ingestion attempt $attempt of 3"
+            if python src/motherduck_export.py; then
+              echo "Rolling 30-day Garmin refresh completed successfully"
+              exit 0
+            else
+              exit_code=$?
+              echo "Attempt $attempt failed with exit code $exit_code"
+              if [ "$attempt" -lt 3 ]; then
+                echo "Waiting 60 seconds before retrying"
+                sleep 60
+              fi
+            fi
+          done
+          echo "Rolling 30-day Garmin refresh failed after 3 attempts"
+          exit 1
