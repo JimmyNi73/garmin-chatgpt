@@ -2,7 +2,7 @@ name: Validate Garmin exporter
 
 on:
   push:
-    branches: [release/garmin-production-clean]
+    branches: [main]
   pull_request:
     branches: [main]
     paths:
