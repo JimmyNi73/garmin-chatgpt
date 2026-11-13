@@ -3,6 +3,9 @@ name: Garmin to MotherDuck | Full History
 
 on:
   workflow_dispatch:
+  schedule:
+    # Daily at 06:00 UTC (07:00 Stockholm in winter, 08:00 in summer).
+    - cron: "0 6 * * *"
   push:
     branches:
       - main
@@ -11,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: garmin-motherduck-full-history
+  group: garmin-motherduck-production
   cancel-in-progress: false
 
 jobs:
@@ -37,7 +40,7 @@ jobs:
 
   ingest:
     needs: validate
-    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[run-garmin-full]') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || contains(github.event.head_commit.message, '[run-garmin-full]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -58,7 +61,7 @@ jobs:
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
           MOTHERDUCK_DATABASE: garmin_github
           MOTHERDUCK_BATCH_SIZE: "100"
-          GARMIN_HISTORY_MODE: "full"
+          GARMIN_HISTORY_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'rolling' }}
           GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
           GARMIN_BATCH_PAUSE_SECONDS: "5"
           GARMIN_MAX_RETRIES: "8"
