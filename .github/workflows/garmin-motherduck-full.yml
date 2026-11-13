@@ -1,4 +1,4 @@
-name: Garmin to MotherDuck | Full History
+name: Garmin to MotherDuck | Production Rolling
 # Full rebuild sourced directly from Garmin Personal API. Dropbox is not used.
 
 on:
@@ -55,7 +55,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade garmin-connect-personal-api-python duckdb==1.5.6
 
-      - name: Load complete Garmin history into MotherDuck
+      - name: Refresh rolling 30-day Garmin data in production MotherDuck
         env:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
