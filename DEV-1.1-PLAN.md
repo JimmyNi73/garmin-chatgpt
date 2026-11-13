@@ -28,6 +28,13 @@ Status: **prepared only; not activated and not scheduled**.
    - Determine supported date windows and endpoint parameters.
    - Keep unavailable periods explicitly distinguishable from true zero values.
 
+4. **Strength-training details**
+   - Add individual exercises for each completed strength activity.
+   - Capture sets, repetitions, and weight/load per set where available.
+   - Link every exercise/set record to its parent `activity_id`.
+   - Backfill historical strength sessions where the source data is available.
+   - Current DEV/production model check: `core.activities.source_payload` contains strength summaries (for example `activeSets`) but its `workouts` array is empty; `core.activity_workouts` has no rows linked to strength activities. Investigate the existing imported source data and extraction/mapping before deciding what additional ingestion is required.
+
 ## DEV isolation rules
 
 - Develop on branch `dev-1.1`; do not commit experimental code to `main`.
