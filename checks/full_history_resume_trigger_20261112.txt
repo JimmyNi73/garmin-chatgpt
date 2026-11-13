@@ -1,1 +1,0 @@
-Trigger full-history rebuild directly from Garmin Personal API after validation fixes.
