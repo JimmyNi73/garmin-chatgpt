@@ -17,6 +17,7 @@ Status: **prepared only; not activated and not scheduled**.
    - Resolve Garmin gear lookup (the current endpoint returned HTTP 404).
    - Map activity gear IDs to historical gear records where available.
    - Preserve unknown/unmapped IDs; never guess a shoe.
+   - Validate that historical activities are correctly linked to the shoes actually used.
 
 2. **VO2 max**
    - Read the dedicated Garmin VO2 max sources, not only activity summaries.
