@@ -1,5 +1,7 @@
 # Garmin data pipeline
 
+Production rolling refresh: last 30 days, upsert-only, scheduled daily.
+
 ## Sources and destinations
 
 - Garmin Personal API is the only source for MotherDuck ingestion. Dropbox ZIP files and archive JSON files are not read by either MotherDuck workflow.
