@@ -263,8 +263,8 @@ def main_full() -> None:
     if not os.getenv("GARMIN_PERSONAL_API_KEY") or not os.getenv("MOTHERDUCK_TOKEN"):
         raise RuntimeError("GARMIN_PERSONAL_API_KEY and MOTHERDUCK_TOKEN are required")
     history_mode = os.getenv("GARMIN_HISTORY_MODE", "full").strip().lower()
-    if history_mode != "full":
-        raise RuntimeError("GARMIN_HISTORY_MODE must be 'full'; partial ingestion is not supported")
+    if history_mode not in ("full", "rolling"):
+        raise RuntimeError("GARMIN_HISTORY_MODE must be 'full' or 'rolling'")
     batch_size = int(os.getenv("MOTHERDUCK_BATCH_SIZE", "100"))
     if batch_size < 1:
         raise ValueError("MOTHERDUCK_BATCH_SIZE must be at least 1")
@@ -276,20 +276,25 @@ def main_full() -> None:
     cli = GarminCLI()
     summaries_by_id: dict[str, dict] = {}
 
-    # Fetch and validate the complete activity index before any writes.
-    for year in range(2000, today.year + 1):
-        year_start = date(year, 1, 1)
-        year_end = min(date(year, 12, 31), today)
-        LOG.info("Fetching Garmin activity index for %d (%s..%s)", year, year_start, year_end)
-        for summary in fetch_activities(cli, year_start.isoformat(), year_end.isoformat()):
+    # Full mode fetches all history; rolling mode refreshes the latest 30 days
+    # and upserts into existing tables without truncating historical data.
+    rolling_start = today - timedelta(days=29)
+    if history_mode == "rolling":
+        ranges = [(rolling_start, today)]
+    else:
+        ranges = [(date(year, 1, 1), min(date(year, 12, 31), today))
+                  for year in range(2000, today.year + 1)]
+    for range_start, range_end in ranges:
+        LOG.info("Fetching Garmin activity index (%s..%s)", range_start, range_end)
+        for summary in fetch_activities(cli, range_start.isoformat(), range_end.isoformat()):
             aid = summary.get("activityId", summary.get("activity_id", summary.get("id")))
             if aid is None:
-                raise RuntimeError(f"Garmin activity index {year}: missing activityId")
+                raise RuntimeError("Garmin activity index: missing activityId")
             if str(aid) in summaries_by_id:
                 raise RuntimeError(f"Garmin activity index contains duplicate activityId: {aid}")
             summaries_by_id[str(aid)] = summary
 
-    if not summaries_by_id:
+    if not summaries_by_id and history_mode == "full":
         raise RuntimeError("Garmin returned no activity history; refusing an empty full load")
     activity_dates = []
     for summary in summaries_by_id.values():
@@ -299,8 +304,10 @@ def main_full() -> None:
                 activity_dates.append(date.fromisoformat(str(stamp)[:10]))
             except ValueError:
                 pass
-    if not activity_dates:
+    if not activity_dates and history_mode == "full":
         raise RuntimeError("Garmin activity index has no usable dates")
+    if history_mode == "rolling":
+        activity_dates.append(rolling_start)
 
     # Fetch profile and heart-rate-zone snapshots before any destructive write.
     # These are part of the Garmin export contract even though they are not daily metrics.
@@ -328,9 +335,10 @@ def main_full() -> None:
         ensure_schema(con)
         ensure_progress_table(con)
 
-        # A new GitHub run starts with a clean rebuild. Re-running the same
-        # workflow run preserves committed data and checkpoints, avoiding loss.
-        initialize_full_rebuild(con, run_id)
+        # Full rebuilds clear tables once per run. Rolling refreshes are
+        # strictly upsert-only and never truncate historical data.
+        if history_mode == "full":
+            initialize_full_rebuild(con, run_id)
 
         for source_name, payload in (
             ("profile_settings", profile),
@@ -347,7 +355,8 @@ def main_full() -> None:
         # idempotent. Every month is validated before its records are written.
         health_month_phase = f"health_month:{run_id}"
         completed_health_months = completed_items(con, health_month_phase)
-        first_month = min(activity_dates).replace(day=1)
+        first_month = (rolling_start if history_mode == "rolling"
+                       else min(activity_dates)).replace(day=1)
         cursor = first_month
         while cursor <= today:
             month_start = cursor
@@ -361,7 +370,8 @@ def main_full() -> None:
                 continue
             LOG.info("Fetching full-month Garmin health history %s (%s..%s)",
                      month, month_start, month_end)
-            health = fetch_month_health(cli, month, today=today, full_month=True)
+            health = fetch_month_health(
+                cli, month, today=today, full_month=(history_mode == "full"))
             if health.get("metadata", {}).get("export_status") != "complete":
                 raise RuntimeError(
                     f"Health source errors for {month}: {health.get('source_errors', [])}")
@@ -382,7 +392,8 @@ def main_full() -> None:
                 con, "source_availability", [availability_record],
                 run_id, batch_size, month)
             by_source: dict[str, list[dict]] = {};
-            for row in health_records("health", health, month_start, month_end):
+            allowed_start = max(month_start, rolling_start) if history_mode == "rolling" else month_start
+            for row in health_records("health", health, allowed_start, month_end):
                 source = row.pop("metric_source")
                 by_source.setdefault(source, []).append(row)
             for source, rows in by_source.items():
@@ -500,11 +511,12 @@ def main_full() -> None:
                 "SELECT record_key FROM raw.activities"
             ).fetchall()
         }
-        if raw_activity_ids != set(summaries_by_id):
+        if not set(summaries_by_id).issubset(raw_activity_ids):
             raise RuntimeError(
-                f"RAW activity ID parity failed: Garmin={len(summaries_by_id)}, "
-                f"MotherDuck={len(raw_activity_ids)}, missing={len(set(summaries_by_id)-raw_activity_ids)}, "
-                f"unexpected={len(raw_activity_ids-set(summaries_by_id))}")
+                f"RAW activity ID parity failed: Garmin window={len(summaries_by_id)}, "
+                f"MotherDuck={len(raw_activity_ids)}, missing={len(set(summaries_by_id)-raw_activity_ids)}")
+        if history_mode == "full" and raw_activity_ids != set(summaries_by_id):
+            raise RuntimeError("Full-history RAW activity ID set differs from Garmin")
 
         # Every source-specific RAW table must exactly mirror generic RAW keys/payloads.
         source_counts = con.execute("""
@@ -534,10 +546,12 @@ def main_full() -> None:
         core_activity_ids = {
             str(row[0]) for row in con.execute("SELECT activity_id FROM core.activities").fetchall()
         }
-        if core_activity_ids != set(summaries_by_id):
+        if not set(summaries_by_id).issubset(core_activity_ids):
             raise RuntimeError(
-                f"CORE activity ID parity failed: Garmin={len(summaries_by_id)}, "
+                f"CORE activity ID parity failed: Garmin window={len(summaries_by_id)}, "
                 f"CORE={len(core_activity_ids)}")
+        if history_mode == "full" and core_activity_ids != set(summaries_by_id):
+            raise RuntimeError("Full-history CORE activity ID set differs from Garmin")
         core_payload_mismatches = con.execute("""
             SELECT count(*)
             FROM core.activities c
@@ -556,9 +570,9 @@ def main_full() -> None:
             "SELECT count(*) FROM information_schema.tables "
             "WHERE table_schema='raw' AND table_name='weight_measurements'"
         ).fetchone()[0] else 0
-        LOG.info("Garmin full-history ingestion succeeded: run=%s activities=%d gear_mapped=%d "
+        LOG.info("Garmin %s ingestion succeeded: run=%s activities=%d gear_mapped=%d "
                  "weight_raw_records=%d requests=%d source_counts=%s",
-                 run_id, len(summaries_by_id), mapped_count, weight_count,
+                 history_mode, run_id, len(summaries_by_id), mapped_count, weight_count,
                  cli.request_count, source_counts)
     finally:
         con.close()
@@ -766,10 +780,10 @@ def main() -> None:
     mode = os.getenv("GARMIN_HISTORY_MODE", "full").strip().lower()
     if mode == "test":
         main_test()
-    elif mode == "full":
+    elif mode in ("full", "rolling"):
         main_full()
     else:
-        raise RuntimeError("GARMIN_HISTORY_MODE must be 'full' or 'test'")
+        raise RuntimeError("GARMIN_HISTORY_MODE must be 'full', 'rolling' or 'test'")
 
 
 if __name__ == "__main__":
