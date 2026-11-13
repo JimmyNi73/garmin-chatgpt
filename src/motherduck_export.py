@@ -262,9 +262,9 @@ def main_full() -> None:
                         format="%(asctime)s %(levelname)s %(message)s")
     if not os.getenv("GARMIN_PERSONAL_API_KEY") or not os.getenv("MOTHERDUCK_TOKEN"):
         raise RuntimeError("GARMIN_PERSONAL_API_KEY and MOTHERDUCK_TOKEN are required")
-    history_mode = os.getenv("GARMIN_HISTORY_MODE", "full").strip().lower()
-    if history_mode not in ("full", "rolling"):
-        raise RuntimeError("GARMIN_HISTORY_MODE must be 'full' or 'rolling'")
+    history_mode = os.getenv("GARMIN_HISTORY_MODE", "rolling").strip().lower()
+    if history_mode != "rolling":
+        raise RuntimeError("Production ingestion is rolling-only; GARMIN_HISTORY_MODE must be 'rolling'")
     batch_size = int(os.getenv("MOTHERDUCK_BATCH_SIZE", "100"))
     if batch_size < 1:
         raise ValueError("MOTHERDUCK_BATCH_SIZE must be at least 1")
@@ -276,14 +276,9 @@ def main_full() -> None:
     cli = GarminCLI()
     summaries_by_id: dict[str, dict] = {}
 
-    # Full mode fetches all history; rolling mode refreshes the latest 30 days
-    # and upserts into existing tables without truncating historical data.
+    # Production is rolling-only: exactly the latest 30 calendar days.
     rolling_start = today - timedelta(days=29)
-    if history_mode == "rolling":
-        ranges = [(rolling_start, today)]
-    else:
-        ranges = [(date(year, 1, 1), min(date(year, 12, 31), today))
-                  for year in range(2000, today.year + 1)]
+    ranges = [(rolling_start, today)]
     for range_start, range_end in ranges:
         LOG.info("Fetching Garmin activity index (%s..%s)", range_start, range_end)
         for summary in fetch_activities(cli, range_start.isoformat(), range_end.isoformat()):
@@ -294,7 +289,7 @@ def main_full() -> None:
                 raise RuntimeError(f"Garmin activity index contains duplicate activityId: {aid}")
             summaries_by_id[str(aid)] = summary
 
-    if not summaries_by_id and history_mode == "full":
+    if not summaries_by_id:
         raise RuntimeError("Garmin returned no activity history; refusing an empty full load")
     activity_dates = []
     for summary in summaries_by_id.values():
@@ -304,7 +299,7 @@ def main_full() -> None:
                 activity_dates.append(date.fromisoformat(str(stamp)[:10]))
             except ValueError:
                 pass
-    if not activity_dates and history_mode == "full":
+    if not activity_dates:
         raise RuntimeError("Garmin activity index has no usable dates")
     if history_mode == "rolling":
         activity_dates.append(rolling_start)
@@ -335,10 +330,7 @@ def main_full() -> None:
         ensure_schema(con)
         ensure_progress_table(con)
 
-        # Full rebuilds clear tables once per run. Rolling refreshes are
-        # strictly upsert-only and never truncate historical data.
-        if history_mode == "full":
-            initialize_full_rebuild(con, run_id)
+        # Rolling refresh is strictly upsert-only. Never truncate historical tables.
 
         for source_name, payload in (
             ("profile_settings", profile),
@@ -355,8 +347,7 @@ def main_full() -> None:
         # idempotent. Every month is validated before its records are written.
         health_month_phase = f"health_month:{run_id}"
         completed_health_months = completed_items(con, health_month_phase)
-        first_month = (rolling_start if history_mode == "rolling"
-                       else min(activity_dates)).replace(day=1)
+        first_month = rolling_start.replace(day=1)
         cursor = first_month
         while cursor <= today:
             month_start = cursor
@@ -371,7 +362,7 @@ def main_full() -> None:
             LOG.info("Fetching full-month Garmin health history %s (%s..%s)",
                      month, month_start, month_end)
             health = fetch_month_health(
-                cli, month, today=today, full_month=(history_mode == "full"))
+                cli, month, today=today, full_month=False)
             if health.get("metadata", {}).get("export_status") != "complete":
                 raise RuntimeError(
                     f"Health source errors for {month}: {health.get('source_errors', [])}")
@@ -392,7 +383,7 @@ def main_full() -> None:
                 con, "source_availability", [availability_record],
                 run_id, batch_size, month)
             by_source: dict[str, list[dict]] = {};
-            allowed_start = max(month_start, rolling_start) if history_mode == "rolling" else month_start
+            allowed_start = max(month_start, rolling_start)
             for row in health_records("health", health, allowed_start, month_end):
                 source = row.pop("metric_source")
                 by_source.setdefault(source, []).append(row)
@@ -777,13 +768,13 @@ def main_test() -> None:
 
 
 def main() -> None:
-    mode = os.getenv("GARMIN_HISTORY_MODE", "full").strip().lower()
+    mode = os.getenv("GARMIN_HISTORY_MODE", "rolling").strip().lower()
     if mode == "test":
         main_test()
-    elif mode in ("full", "rolling"):
+    elif mode == "rolling":
         main_full()
     else:
-        raise RuntimeError("GARMIN_HISTORY_MODE must be 'full', 'rolling' or 'test'")
+        raise RuntimeError("Production mode is rolling-only. Use GARMIN_HISTORY_MODE=rolling.")
 
 
 if __name__ == "__main__":
