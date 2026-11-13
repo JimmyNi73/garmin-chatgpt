@@ -4,8 +4,8 @@ name: Garmin to MotherDuck | Full History
 on:
   workflow_dispatch:
   schedule:
-    # Daily at 06:00 UTC (07:00 Stockholm in winter, 08:00 in summer).
-    - cron: "0 6 * * *"
+    # Daily at 05:00 UTC (06:00 Stockholm in winter, 07:00 in summer).
+    - cron: "0 5 * * *"
   push:
     branches:
       - main
@@ -61,7 +61,7 @@ jobs:
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
           MOTHERDUCK_DATABASE: garmin_github
           MOTHERDUCK_BATCH_SIZE: "100"
-          GARMIN_HISTORY_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'rolling' }}
+          GARMIN_HISTORY_MODE: "rolling"
           GARMIN_REQUEST_PAUSE_SECONDS: "0.3"
           GARMIN_BATCH_PAUSE_SECONDS: "5"
           GARMIN_MAX_RETRIES: "8"
