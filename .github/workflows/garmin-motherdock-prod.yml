@@ -7,6 +7,8 @@ on:
     # 08:07, 14:07, 17:07, 20:07 and 22:07 Stockholm time.
     - cron: "7 8,14,17,20,22 * * *"
       timezone: "Europe/Stockholm"
+  issues:
+    types: [opened]
 
 permissions:
   contents: read
@@ -17,6 +19,8 @@ concurrency:
 
 jobs:
   validate:
+    # Public Issues may trigger the workflow, but only JimmyNi73 can request an export.
+    if: ${{ github.event_name != 'issues' || (github.event.action == 'opened' && github.event.issue.user.login == 'JimmyNi73' && github.event.issue.title == 'Starta Garmin-export') }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -33,6 +37,7 @@ jobs:
         run: python -m unittest discover -s checks -p '*_checks.py' -v
 
   ingest:
+    if: ${{ github.event_name != 'issues' || (github.event.action == 'opened' && github.event.issue.user.login == 'JimmyNi73' && github.event.issue.title == 'Starta Garmin-export') }}
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 360
