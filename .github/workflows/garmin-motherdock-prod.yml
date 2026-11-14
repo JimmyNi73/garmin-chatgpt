@@ -4,8 +4,8 @@ run-name: Garmin to MotherDock Prod
 on:
   workflow_dispatch:
   schedule:
-    # 08:07, 14:07, 17:07, 20:07 and 22:07 Stockholm time.
-    - cron: "7 8,14,17,20,22 * * *"
+    # Every two hours at minute 23, Europe/Stockholm.
+    - cron: "23 */2 * * *"
       timezone: "Europe/Stockholm"
   issues:
     types: [opened]
