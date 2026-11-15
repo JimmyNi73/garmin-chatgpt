@@ -182,6 +182,26 @@ class ExportHelperTests(unittest.TestCase):
         self.assertEqual(len(unavailable), 1)
         self.assertIn("HTTP 400", unavailable[0]["reason"])
 
+    def test_food_log_http_500_becomes_optional_gap_without_nested_retries(self):
+        class Http500CLI:
+            def __init__(self):
+                self.calls = 0
+            def run(self, label, *args):
+                self.calls += 1
+                raise RuntimeError("food-logs failed after 3 attempts: HTTP 500")
+
+        cli = Http500CLI()
+        unavailable = []
+        ok, value = ge.optional_daily(
+            cli, unavailable, "food-logs 2026-10-01",
+            "food-logs", "--date", "2026-10-01",
+            allow_server_error_gap=True)
+        self.assertTrue(ok)
+        self.assertIsNone(value)
+        self.assertEqual(cli.calls, 1)
+        self.assertEqual(unavailable[0]["source"], "food-logs 2026-10-01")
+        self.assertIn("HTTP 5xx", unavailable[0]["reason"])
+
     def test_optional_daily_recognizes_http_404(self):
         class Http404CLI:
             def run(self, label, *args):
