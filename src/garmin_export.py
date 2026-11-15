@@ -714,13 +714,24 @@ def ensure_dropbox_folders(dbx: dropbox.Dropbox) -> None:
 
 
 def optional_daily(cli: GarminCLI, unavailable: list[dict[str, str]],
-                  label: str, *args: str) -> tuple[bool, Any]:
-    """Retry transient daily-endpoint failures three times, then record a gap and continue."""
+                  label: str, *args: str,
+                  allow_server_error_gap: bool = False) -> tuple[bool, Any]:
+    """Fetch an optional daily source; selected non-critical 5xx failures become explicit gaps."""
     for attempt in range(1, 4):
         try:
             return True, cli.run(label, *args)
         except Exception as exc:
             message = str(exc)
+            if allow_server_error_gap and re.search(r"HTTP\s*5\d\d", message, re.I):
+                # GarminCLI has already exhausted its own 3-attempt 5xx retry policy.
+                # Do not retry that same exhausted request three more times here.
+                LOG.warning("%s unavailable after Garmin server retries; continuing without this optional source: %s",
+                            label, message)
+                unavailable.append({
+                    "source": label,
+                    "reason": "Garmin HTTP 5xx after retries; optional source omitted",
+                })
+                return True, None
             if re.search(r"HTTP\s*5\d\d|timed out|timeout|temporar", message, re.I):
                 if attempt < 3:
                     wait = 5 * attempt
@@ -828,8 +839,10 @@ def fetch_month_health(cli: GarminCLI, month: str,
         for field, command in (("sleep", "sleep"), ("heart_rate", "heart-rate"),
                                ("hrv", "hrv"), ("spo2", "spo2"),
                                ("fitness_age", "fitness-age"), ("food_logs", "food-logs")):
-            ok, value = optional_daily(cli, unavailable, f"{command} {day}",
-                                       command, "--date", day)
+            ok, value = optional_daily(
+                cli, unavailable, f"{command} {day}",
+                command, "--date", day,
+                allow_server_error_gap=(field == "food_logs"))
             daily_row[field] = enrich_device_ids(value) if ok else None
         data["by_date"][day] = daily_row
     data["metadata"] = {
