@@ -271,7 +271,8 @@ def main_full() -> None:
     LOG.info("Configured ingestion mode: %s; MotherDuck batch size: %d",
              history_mode, batch_size)
 
-    today = datetime.now(TZ).date()
+    started_at = datetime.now(TZ)
+    today = started_at.date()
     run_id = os.getenv("GITHUB_RUN_ID") or str(uuid.uuid4())
     cli = GarminCLI()
     summaries_by_id: dict[str, dict] = {}
@@ -329,6 +330,16 @@ def main_full() -> None:
     try:
         ensure_schema(con)
         ensure_progress_table(con)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS raw.etl_run_log (
+                run_id VARCHAR PRIMARY KEY,
+                started_at TIMESTAMPTZ NOT NULL,
+                completed_at TIMESTAMPTZ NOT NULL,
+                trigger VARCHAR NOT NULL,
+                status VARCHAR NOT NULL,
+                records_loaded BIGINT NOT NULL
+            )
+        """)
 
         # Rolling refresh is strictly upsert-only. Never truncate historical tables.
 
@@ -561,10 +572,25 @@ def main_full() -> None:
             "SELECT count(*) FROM information_schema.tables "
             "WHERE table_schema='raw' AND table_name='weight_measurements'"
         ).fetchone()[0] else 0
+        # The success row is deliberately the final database write: it is only
+        # recorded after every ingestion, parity check, and CORE/MART model check passes.
+        completed_at = datetime.now(TZ)
+        trigger = os.getenv("GITHUB_EVENT_NAME", "local")
+        con.execute("""
+            INSERT INTO raw.etl_run_log
+                (run_id, started_at, completed_at, trigger, status, records_loaded)
+            VALUES (?, ?, ?, ?, 'SUCCESS', ?)
+            ON CONFLICT (run_id) DO UPDATE SET
+                started_at = excluded.started_at,
+                completed_at = excluded.completed_at,
+                trigger = excluded.trigger,
+                status = excluded.status,
+                records_loaded = excluded.records_loaded
+        """, [run_id, started_at, completed_at, trigger, total_loaded])
         LOG.info("Garmin %s ingestion succeeded: run=%s activities=%d gear_mapped=%d "
-                 "weight_raw_records=%d requests=%d source_counts=%s",
+                 "weight_raw_records=%d records_loaded=%d requests=%d source_counts=%s",
                  history_mode, run_id, len(summaries_by_id), mapped_count, weight_count,
-                 cli.request_count, source_counts)
+                 total_loaded, cli.request_count, source_counts)
     finally:
         con.close()
 
